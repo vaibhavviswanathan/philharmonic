@@ -1,6 +1,7 @@
 import { getSandbox, type Sandbox as SandboxInstance } from "@cloudflare/sandbox";
 import type { DispatchPayload, Sandbox } from "@phil/shared";
 import type { Env } from "../env.js";
+import { runAgentLoop } from "./agent.js";
 
 export class SandboxManager {
   constructor(private env: Env) {}
@@ -8,27 +9,15 @@ export class SandboxManager {
   async create(payload: DispatchPayload): Promise<{ sandbox: SandboxInstance; meta: Sandbox }> {
     const sandboxId = `task-${payload.taskId}`;
     const sandbox = getSandbox(this.env.Sandbox, sandboxId, {
-      keepAlive: true, // Agent process is long-running; we destroy explicitly
+      keepAlive: true,
     });
 
-    // Clone the repo inside the sandbox
-    await sandbox.exec(`git clone ${payload.repoContext.repoUrl} /workspace`, {
-      env: {
-        GIT_TERMINAL_PROMPT: "0",
-        GITHUB_TOKEN: this.env.GITHUB_TOKEN,
-        GIT_ASKPASS: "echo",
-      },
-    });
+    // Configure git inside the sandbox
+    await sandbox.exec('git config --global user.name "Phil Agent"');
+    await sandbox.exec('git config --global user.email "phil@agent.local"');
 
-    // Configure git
-    await sandbox.exec('git config user.name "Phil Agent"', { cwd: "/workspace" });
-    await sandbox.exec('git config user.email "phil@agent.local"', { cwd: "/workspace" });
-
-    // Write dispatch payload
-    await sandbox.writeFile(
-      "/workspace/.phil-dispatch.json",
-      JSON.stringify(payload, null, 2),
-    );
+    // Create feature branch (repo already cloned during planning phase)
+    await sandbox.exec(`git checkout -b ${payload.branchName}`, { cwd: "/workspace" });
 
     const meta: Sandbox = {
       id: sandboxId,
@@ -43,37 +32,15 @@ export class SandboxManager {
     return { sandbox, meta };
   }
 
+  /**
+   * Run the agent loop from the Worker, executing tools via Sandbox SDK.
+   */
   async runAgent(
     sandbox: SandboxInstance,
     payload: DispatchPayload,
     onLog: (message: string) => Promise<void>,
-  ): Promise<void> {
-    // Start the agent as a background process
-    const process = await sandbox.startProcess(
-      "node /app/packages/sandbox-runtime/dist/lifecycle.js",
-      {
-        processId: `agent-${payload.taskId}`,
-        cwd: "/workspace",
-        env: {
-          ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
-          GITHUB_TOKEN: this.env.GITHUB_TOKEN,
-          PHIL_TASK_ID: payload.taskId,
-          PHIL_SANDBOX_ID: `task-${payload.taskId}`,
-          PHIL_CALLBACK_URL: this.env.WORKER_URL ?? "",
-        },
-      },
-    );
-
-    await onLog("Agent process started in sandbox");
-
-    // Wait for the agent to complete
-    await process.waitForExit();
-
-    // Collect logs
-    const logs = await sandbox.getProcessLogs(`agent-${payload.taskId}`);
-    if (logs) {
-      await onLog(`Agent finished. Last output: ${String(logs).slice(-500)}`);
-    }
+  ): Promise<{ prUrl?: string }> {
+    return runAgentLoop(sandbox, payload, this.env, onLog);
   }
 
   async destroy(taskId: string): Promise<void> {
@@ -83,7 +50,8 @@ export class SandboxManager {
   }
 
   /**
-   * For the planner: create a temporary sandbox to clone and analyze a repo
+   * For the planner: create a sandbox, clone and analyze a repo.
+   * The same sandbox is reused for implementation (already has the repo).
    */
   async analyzeRepo(
     repoUrl: string,

@@ -1,0 +1,11 @@
+{
+  "cloudflare": {
+    "subdomain": "vaibhavviswanathan",
+    "workerName": "phil-orchestrator",
+    "pagesProject": "phil-dashboard"
+  },
+  "sandbox": {
+    "instanceType": "standard-1",
+    "maxInstances": 10
+  }
+}

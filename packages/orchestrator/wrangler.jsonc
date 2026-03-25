@@ -2,43 +2,39 @@
   "name": "phil-orchestrator",
   "main": "src/index.ts",
   "compatibility_date": "2025-04-01",
-
-  // Durable Objects
+  "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "TASK_COORDINATOR", "class_name": "TaskCoordinator" },
-      { "name": "Sandbox", "class_name": "Sandbox" }
+      {
+        "name": "TASK_COORDINATOR",
+        "class_name": "TaskCoordinator"
+      },
+      {
+        "name": "Sandbox",
+        "class_name": "Sandbox"
+      }
     ]
   },
-
-  // Sandbox SDK container
   "containers": [
     {
       "class_name": "Sandbox",
       "image": "../../docker/Dockerfile.sandbox",
-      "instance_type": "standard",
+      "instance_type": "standard-1",
       "max_instances": 10
     }
   ],
-
-  // Migrations
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TaskCoordinator", "Sandbox"]
+      "new_sqlite_classes": [
+        "TaskCoordinator",
+        "Sandbox"
+      ]
     }
   ],
-
-  // KV for repo knowledge base
-  "kv_namespaces": [
-    { "binding": "REPO_KB", "id": "" }
-  ],
-
-  // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
-    "WORKER_URL": "https://phil-orchestrator.<your-subdomain>.workers.dev"
+    "WORKER_URL": "https://phil-orchestrator.vaibhavviswanathan.workers.dev"
   },
-
   "observability": {
     "enabled": true
   }

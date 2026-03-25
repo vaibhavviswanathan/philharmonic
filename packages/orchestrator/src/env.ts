@@ -7,8 +7,8 @@ export interface Env {
   // Sandbox SDK — must be named "Sandbox" for proxyToSandbox() compatibility
   Sandbox: DurableObjectNamespace<Sandbox>;
 
-  // KV
-  REPO_KB: KVNamespace;
+  // KV (Phase 2 — optional for now)
+  REPO_KB?: KVNamespace;
 
   // Secrets
   ANTHROPIC_API_KEY: string;

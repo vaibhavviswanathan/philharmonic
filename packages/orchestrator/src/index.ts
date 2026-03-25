@@ -194,9 +194,19 @@ async function runTask(task: Task, env: Env): Promise<void> {
     const sandboxManager = new SandboxManager(env);
     const { sandbox } = await sandboxManager.create(payload);
 
-    await sandboxManager.runAgent(sandbox, payload, async (msg) => {
+    const result = await sandboxManager.runAgent(sandbox, payload, async (msg) => {
       await doRpc(coordinator, "appendLog", task.id, `task-${task.id}`, msg, "info");
     });
+
+    // Mark success and record PR URL
+    await doRpc(coordinator, "updateTask", task.id, {
+      status: "success",
+      prUrl: result.prUrl,
+    });
+    await doRpc(coordinator, "appendLog", task.id, "", "Task completed successfully", "info");
+
+    // Tear down sandbox
+    await sandboxManager.destroy(task.id).catch(() => {});
   } catch (err) {
     console.error(`Task ${task.id} failed:`, err);
     await doRpc(coordinator, "updateTask", task.id, {
