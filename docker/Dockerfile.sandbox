@@ -1,0 +1,27 @@
+FROM docker.io/cloudflare/sandbox:latest
+
+# Install GitHub CLI
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy sandbox-runtime package
+WORKDIR /app
+COPY packages/shared/package.json packages/shared/
+COPY packages/shared/dist/ packages/shared/dist/
+COPY packages/sandbox-runtime/package.json packages/sandbox-runtime/
+COPY package.json pnpm-workspace.yaml ./
+RUN pnpm install --filter @phil/sandbox-runtime --frozen-lockfile 2>/dev/null || pnpm install --filter @phil/sandbox-runtime
+COPY packages/sandbox-runtime/dist/ packages/sandbox-runtime/dist/
+
+WORKDIR /workspace
+
+# Required for wrangler dev port access
+EXPOSE 8080

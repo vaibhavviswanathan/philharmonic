@@ -1,0 +1,24 @@
+{
+  "name": "@phil/sandbox-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/lifecycle.js",
+  "bin": {
+    "phil-sandbox": "dist/lifecycle.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch src/lifecycle.ts"
+  },
+  "dependencies": {
+    "@phil/shared": "workspace:*",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "nanoid": "^5.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.19.0"
+  }
+}
