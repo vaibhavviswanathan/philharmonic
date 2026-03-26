@@ -1,6 +1,6 @@
 {
   "cloudflare": {
-    "subdomain": "vaibhavviswanathan",
+    "subdomain": "vviswanathan",
     "workerName": "phil-orchestrator",
     "pagesProject": "phil-dashboard"
   },
