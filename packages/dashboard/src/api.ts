@@ -2,8 +2,20 @@ const API_BASE = import.meta.env.VITE_API_URL ?? "/v1";
 const WS_BASE = import.meta.env.VITE_WS_URL ??
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/v1`;
 
+// --- Types ---
+
+export interface Project {
+  id: string;
+  name: string;
+  repoUrl: string;
+  defaultBranch?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Task {
   id: string;
+  projectId: string;
   repoUrl: string;
   description: string;
   status: string;
@@ -32,18 +44,68 @@ export interface PhilEvent {
   data: Record<string, unknown>;
 }
 
-export async function createTask(repoUrl: string, description: string): Promise<Task> {
+export interface Settings {
+  anthropicApiKey: string;
+  githubToken: string;
+  envAnthropicApiKey: boolean;
+  envGithubToken: boolean;
+}
+
+// --- Settings ---
+
+export async function getSettings(): Promise<Settings> {
+  const res = await fetch(`${API_BASE}/settings`);
+  if (!res.ok) throw new Error(`Failed to get settings: ${res.statusText}`);
+  return res.json();
+}
+
+export async function updateSettings(updates: { anthropicApiKey?: string; githubToken?: string }): Promise<void> {
+  const res = await fetch(`${API_BASE}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error(`Failed to update settings: ${res.statusText}`);
+}
+
+// --- Projects ---
+
+export async function createProject(name: string, repoUrl: string): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, repoUrl }),
+  });
+  if (!res.ok) throw new Error(`Failed to create project: ${res.statusText}`);
+  return res.json();
+}
+
+export async function listProjects(): Promise<Project[]> {
+  const res = await fetch(`${API_BASE}/projects`);
+  if (!res.ok) throw new Error(`Failed to list projects: ${res.statusText}`);
+  return res.json();
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/projects/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to delete project: ${res.statusText}`);
+}
+
+// --- Tasks ---
+
+export async function createTask(projectId: string, description: string): Promise<Task> {
   const res = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repoUrl, description }),
+    body: JSON.stringify({ projectId, description }),
   });
   if (!res.ok) throw new Error(`Failed to create task: ${res.statusText}`);
   return res.json();
 }
 
-export async function listTasks(): Promise<Task[]> {
-  const res = await fetch(`${API_BASE}/tasks`);
+export async function listTasks(projectId?: string): Promise<Task[]> {
+  const url = projectId ? `${API_BASE}/tasks?projectId=${projectId}` : `${API_BASE}/tasks`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to list tasks: ${res.statusText}`);
   return res.json();
 }
@@ -59,10 +121,8 @@ export async function cancelTask(id: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to cancel task: ${res.statusText}`);
 }
 
-/**
- * Subscribe to real-time events via WebSocket (connects to Durable Object).
- * Receives all task events — filter client-side by taskId if needed.
- */
+// --- WebSocket ---
+
 export function subscribeToEvents(
   onEvent: (event: PhilEvent) => void,
 ): () => void {
@@ -80,7 +140,6 @@ export function subscribeToEvents(
   ws.onerror = () => {};
 
   ws.onclose = () => {
-    // Auto-reconnect after 3s
     setTimeout(() => {
       subscribeToEvents(onEvent);
     }, 3000);

@@ -1,7 +1,18 @@
 import { z } from "zod";
 
-export const CreateTaskSchema = z.object({
+// --- Projects ---
+
+export const CreateProjectSchema = z.object({
+  name: z.string().min(1).max(200),
   repoUrl: z.string().url(),
+});
+
+export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
+
+// --- Tasks ---
+
+export const CreateTaskSchema = z.object({
+  projectId: z.string().min(1),
   description: z.string().min(1).max(2000),
 });
 
@@ -10,6 +21,17 @@ export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 export const TaskIdParamSchema = z.object({
   id: z.string(),
 });
+
+// --- Settings ---
+
+export const UpdateSettingsSchema = z.object({
+  anthropicApiKey: z.string().optional(),
+  githubToken: z.string().optional(),
+});
+
+export type UpdateSettingsInput = z.infer<typeof UpdateSettingsSchema>;
+
+// --- Sandbox callbacks ---
 
 export const SandboxStatusUpdateSchema = z.object({
   sandboxId: z.string(),

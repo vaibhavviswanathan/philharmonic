@@ -10,9 +10,9 @@ export interface Env {
   // KV (Phase 2 — optional for now)
   REPO_KB?: KVNamespace;
 
-  // Secrets
-  ANTHROPIC_API_KEY: string;
-  GITHUB_TOKEN: string;
+  // Secrets (optional — can be set via UI settings instead)
+  ANTHROPIC_API_KEY?: string;
+  GITHUB_TOKEN?: string;
 
   // Vars
   WORKER_URL?: string;

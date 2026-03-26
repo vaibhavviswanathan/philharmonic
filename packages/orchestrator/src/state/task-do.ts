@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Task, TaskStatus, Subtask, PhilEvent } from "@phil/shared";
+import type { Task, TaskStatus, Subtask, Project, PhilEvent } from "@phil/shared";
 import type { Env } from "../env.js";
 
 export class TaskCoordinator extends DurableObject<Env> {
@@ -7,8 +7,17 @@ export class TaskCoordinator extends DurableObject<Env> {
 
   private ensureSchema(): void {
     this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        repo_url TEXT NOT NULL,
+        default_branch TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
         repo_url TEXT NOT NULL,
         description TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued',
@@ -40,6 +49,10 @@ export class TaskCoordinator extends DurableObject<Env> {
         level TEXT NOT NULL DEFAULT 'info',
         timestamp TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
   }
 
@@ -48,13 +61,87 @@ export class TaskCoordinator extends DurableObject<Env> {
     this.ensureSchema();
   }
 
+  // --- Settings ---
+
+  async getSettings(): Promise<{ anthropicApiKey?: string; githubToken?: string }> {
+    const rows = this.ctx.storage.sql.exec(
+      `SELECT key, value FROM settings WHERE key IN ('anthropic_api_key', 'github_token')`
+    ).toArray();
+    const map: Record<string, string> = {};
+    for (const row of rows) {
+      map[row.key as string] = row.value as string;
+    }
+    return {
+      anthropicApiKey: map.anthropic_api_key,
+      githubToken: map.github_token,
+    };
+  }
+
+  async updateSettings(updates: { anthropicApiKey?: string; githubToken?: string }): Promise<void> {
+    if (updates.anthropicApiKey !== undefined) {
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO settings (key, value) VALUES ('anthropic_api_key', ?)`,
+        updates.anthropicApiKey,
+      );
+    }
+    if (updates.githubToken !== undefined) {
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO settings (key, value) VALUES ('github_token', ?)`,
+        updates.githubToken,
+      );
+    }
+  }
+
+  // --- Projects ---
+
+  async createProject(project: Project): Promise<Project> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO projects (id, name, repo_url, default_branch, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      project.id, project.name, project.repoUrl, project.defaultBranch ?? null,
+      project.createdAt, project.updatedAt,
+    );
+    this.broadcast({ type: "project_created", taskId: "", timestamp: project.createdAt, data: { project } });
+    return project;
+  }
+
+  async getProject(id: string): Promise<Project | null> {
+    const row = this.ctx.storage.sql.exec(
+      `SELECT * FROM projects WHERE id = ?`, id
+    ).one();
+    if (!row) return null;
+    return this.rowToProject(row);
+  }
+
+  async listProjects(): Promise<Project[]> {
+    const rows = this.ctx.storage.sql.exec(
+      `SELECT * FROM projects ORDER BY created_at DESC`
+    ).toArray();
+    return rows.map((r) => this.rowToProject(r));
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    // Delete all tasks and their subtasks/logs for this project
+    const tasks = this.ctx.storage.sql.exec(
+      `SELECT id FROM tasks WHERE project_id = ?`, id
+    ).toArray();
+    for (const t of tasks) {
+      const taskId = t.id as string;
+      this.ctx.storage.sql.exec(`DELETE FROM subtasks WHERE task_id = ?`, taskId);
+      this.ctx.storage.sql.exec(`DELETE FROM logs WHERE task_id = ?`, taskId);
+    }
+    this.ctx.storage.sql.exec(`DELETE FROM tasks WHERE project_id = ?`, id);
+    this.ctx.storage.sql.exec(`DELETE FROM projects WHERE id = ?`, id);
+  }
+
   // --- Task CRUD ---
 
   async createTask(task: Task): Promise<Task> {
     this.ctx.storage.sql.exec(
-      `INSERT INTO tasks (id, repo_url, description, status, branch_name, touch_set, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, project_id, repo_url, description, status, branch_name, touch_set, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       task.id,
+      task.projectId,
       task.repoUrl,
       task.description,
       task.status,
@@ -80,7 +167,13 @@ export class TaskCoordinator extends DurableObject<Env> {
     return this.rowToTask(row);
   }
 
-  async listTasks(): Promise<Task[]> {
+  async listTasks(projectId?: string): Promise<Task[]> {
+    if (projectId) {
+      const rows = this.ctx.storage.sql.exec(
+        `SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at DESC`, projectId
+      ).toArray();
+      return rows.map((r) => this.rowToTask(r));
+    }
     const rows = this.ctx.storage.sql.exec(
       `SELECT * FROM tasks ORDER BY created_at DESC`
     ).toArray();
@@ -156,7 +249,6 @@ export class TaskCoordinator extends DurableObject<Env> {
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
     // Client can send ping or subscribe to specific task IDs
-    // For now, all clients get all events
   }
 
   webSocketClose(ws: WebSocket): void {
@@ -175,6 +267,17 @@ export class TaskCoordinator extends DurableObject<Env> {
     );
   }
 
+  private rowToProject(row: Record<string, unknown>): Project {
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      repoUrl: row.repo_url as string,
+      defaultBranch: row.default_branch as string | undefined,
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
+    };
+  }
+
   private rowToTask(row: Record<string, unknown>): Task {
     const subtaskRows = this.ctx.storage.sql.exec(
       `SELECT * FROM subtasks WHERE task_id = ? ORDER BY id`,
@@ -183,6 +286,7 @@ export class TaskCoordinator extends DurableObject<Env> {
 
     return {
       id: row.id as string,
+      projectId: row.project_id as string,
       repoUrl: row.repo_url as string,
       description: row.description as string,
       status: row.status as TaskStatus,

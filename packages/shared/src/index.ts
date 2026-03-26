@@ -5,6 +5,8 @@ export type {
   SubtaskStatus,
 } from "./types/task.js";
 
+export type { Project } from "./types/project.js";
+
 export type { Sandbox, SandboxState } from "./types/sandbox.js";
 
 export type {
@@ -29,14 +31,18 @@ export type {
 export { defaultAllowedTools } from "./tools/definitions.js";
 
 export {
+  CreateProjectSchema,
   CreateTaskSchema,
   TaskIdParamSchema,
+  UpdateSettingsSchema,
   SandboxStatusUpdateSchema,
   SandboxLogSchema,
 } from "./schemas/api.js";
 
 export type {
+  CreateProjectInput,
   CreateTaskInput,
+  UpdateSettingsInput,
   SandboxStatusUpdate,
   SandboxLog,
 } from "./schemas/api.js";

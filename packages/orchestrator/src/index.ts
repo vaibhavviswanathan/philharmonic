@@ -4,10 +4,13 @@ import { nanoid } from "nanoid";
 import { proxyToSandbox } from "@cloudflare/sandbox";
 export { Sandbox } from "@cloudflare/sandbox";
 import {
+  CreateProjectSchema,
   CreateTaskSchema,
+  UpdateSettingsSchema,
   SandboxStatusUpdateSchema,
   SandboxLogSchema,
   type Task,
+  type Project,
 } from "@phil/shared";
 import type { Env } from "./env.js";
 import { TaskCoordinator } from "./state/task-do.js";
@@ -27,22 +30,105 @@ function getCoordinator(env: Env): DurableObjectStub {
   return env.TASK_COORDINATOR.get(id);
 }
 
-// Type-safe RPC calls to the DO
 async function doRpc<T>(stub: DurableObjectStub, method: string, ...args: unknown[]): Promise<T> {
   return (stub as unknown as Record<string, (...a: unknown[]) => Promise<T>>)[method](...args);
 }
 
-// --- Public API ---
+/** Resolve tokens: DO settings override env vars */
+async function resolveSecrets(env: Env): Promise<{ anthropicApiKey: string; githubToken: string }> {
+  const coordinator = getCoordinator(env);
+  const settings = await doRpc<{ anthropicApiKey?: string; githubToken?: string }>(coordinator, "getSettings");
+  return {
+    anthropicApiKey: settings.anthropicApiKey || env.ANTHROPIC_API_KEY || "",
+    githubToken: settings.githubToken || env.GITHUB_TOKEN || "",
+  };
+}
+
+// --- Settings API ---
+
+app.get("/v1/settings", async (c) => {
+  const coordinator = getCoordinator(c.env);
+  const settings = await doRpc<{ anthropicApiKey?: string; githubToken?: string }>(coordinator, "getSettings");
+  // Return masked values so the UI knows which are set
+  return c.json({
+    anthropicApiKey: settings.anthropicApiKey ? "sk-...configured" : "",
+    githubToken: settings.githubToken ? "ghp_...configured" : "",
+    // Also indicate if env vars are set
+    envAnthropicApiKey: c.env.ANTHROPIC_API_KEY ? true : false,
+    envGithubToken: c.env.GITHUB_TOKEN ? true : false,
+  });
+});
+
+app.put("/v1/settings", async (c) => {
+  const body = await c.req.json();
+  const parsed = UpdateSettingsSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
+
+  const coordinator = getCoordinator(c.env);
+  await doRpc(coordinator, "updateSettings", parsed.data);
+  return c.json({ ok: true });
+});
+
+// --- Projects API ---
+
+app.post("/v1/projects", async (c) => {
+  const body = await c.req.json();
+  const parsed = CreateProjectSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
+
+  const now = new Date().toISOString();
+  const project: Project = {
+    id: nanoid(),
+    name: parsed.data.name,
+    repoUrl: parsed.data.repoUrl,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const coordinator = getCoordinator(c.env);
+  await doRpc(coordinator, "createProject", project);
+  return c.json(project, 201);
+});
+
+app.get("/v1/projects", async (c) => {
+  const coordinator = getCoordinator(c.env);
+  const projects = await doRpc<Project[]>(coordinator, "listProjects");
+  return c.json(projects);
+});
+
+app.get("/v1/projects/:id", async (c) => {
+  const coordinator = getCoordinator(c.env);
+  const project = await doRpc<Project | null>(coordinator, "getProject", c.req.param("id"));
+  if (!project) return c.json({ error: "Project not found" }, 404);
+  return c.json(project);
+});
+
+app.delete("/v1/projects/:id", async (c) => {
+  const coordinator = getCoordinator(c.env);
+  const project = await doRpc<Project | null>(coordinator, "getProject", c.req.param("id"));
+  if (!project) return c.json({ error: "Project not found" }, 404);
+  await doRpc(coordinator, "deleteProject", c.req.param("id"));
+  return c.json({ ok: true });
+});
+
+// --- Tasks API ---
 
 app.post("/v1/tasks", async (c) => {
   const body = await c.req.json();
   const parsed = CreateTaskSchema.safeParse(body);
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
 
+  const coordinator = getCoordinator(c.env);
+
+  // Resolve project to get repoUrl
+  const project = await doRpc<Project | null>(coordinator, "getProject", parsed.data.projectId);
+  if (!project) return c.json({ error: "Project not found" }, 404);
+
   const now = new Date().toISOString();
   const task: Task = {
     id: nanoid(),
-    repoUrl: parsed.data.repoUrl,
+    projectId: project.id,
+    repoUrl: project.repoUrl,
     description: parsed.data.description,
     status: "queued",
     branchName: `phil/${nanoid(8)}`,
@@ -52,7 +138,6 @@ app.post("/v1/tasks", async (c) => {
     updatedAt: now,
   };
 
-  const coordinator = getCoordinator(c.env);
   await doRpc(coordinator, "createTask", task);
 
   // Run planning + execution asynchronously
@@ -61,17 +146,18 @@ app.post("/v1/tasks", async (c) => {
   return c.json(task, 201);
 });
 
+app.get("/v1/tasks", async (c) => {
+  const projectId = c.req.query("projectId");
+  const coordinator = getCoordinator(c.env);
+  const tasks = await doRpc<Task[]>(coordinator, "listTasks", projectId);
+  return c.json(tasks);
+});
+
 app.get("/v1/tasks/:id", async (c) => {
   const coordinator = getCoordinator(c.env);
   const task = await doRpc<Task | null>(coordinator, "getTask", c.req.param("id"));
   if (!task) return c.json({ error: "Task not found" }, 404);
   return c.json(task);
-});
-
-app.get("/v1/tasks", async (c) => {
-  const coordinator = getCoordinator(c.env);
-  const tasks = await doRpc<Task[]>(coordinator, "listTasks");
-  return c.json(tasks);
 });
 
 app.delete("/v1/tasks/:id", async (c) => {
@@ -82,7 +168,6 @@ app.delete("/v1/tasks/:id", async (c) => {
 
   await doRpc(coordinator, "updateTask", taskId, { status: "cancelled" });
 
-  // Destroy sandbox if running
   c.executionCtx.waitUntil(
     new SandboxManager(c.env).destroy(taskId).catch(() => {}),
   );
@@ -114,7 +199,6 @@ app.post("/internal/sandboxes/:taskId/status", async (c) => {
         prUrl: update.prUrl,
         prNumber: update.prNumber,
       });
-      // Tear down sandbox
       c.executionCtx.waitUntil(
         new SandboxManager(c.env).destroy(taskId).catch(() => {}),
       );
@@ -174,12 +258,36 @@ app.get("/health", (c) => c.json({ status: "ok" }));
 async function runTask(task: Task, env: Env): Promise<void> {
   const coordinator = getCoordinator(env);
 
+  // Resolve secrets from DO settings (with env fallback)
+  const secrets = await resolveSecrets(env);
+  if (!secrets.anthropicApiKey) {
+    await doRpc(coordinator, "updateTask", task.id, {
+      status: "failed",
+      error: "ANTHROPIC_API_KEY not configured. Go to Settings to add it.",
+    });
+    return;
+  }
+  if (!secrets.githubToken) {
+    await doRpc(coordinator, "updateTask", task.id, {
+      status: "failed",
+      error: "GITHUB_TOKEN not configured. Go to Settings to add it.",
+    });
+    return;
+  }
+
+  // Build an env-like object with resolved secrets
+  const resolvedEnv: Env = {
+    ...env,
+    ANTHROPIC_API_KEY: secrets.anthropicApiKey,
+    GITHUB_TOKEN: secrets.githubToken,
+  };
+
   try {
     // Phase 1: Planning
     await doRpc(coordinator, "updateTask", task.id, { status: "planning" });
     await doRpc(coordinator, "appendLog", task.id, "", "Starting planning phase...", "info");
 
-    const payload = await planTask(task.id, task.repoUrl, task.description, env);
+    const payload = await planTask(task.id, task.repoUrl, task.description, resolvedEnv);
 
     // Update task with plan results
     await doRpc(coordinator, "updateTask", task.id, {
@@ -190,8 +298,8 @@ async function runTask(task: Task, env: Env): Promise<void> {
     });
     await doRpc(coordinator, "appendLog", task.id, "", `Plan created: ${payload.subtasks.length} subtasks`, "info");
 
-    // Phase 2: Execute in sandbox (repo already cloned during planning)
-    const sandboxManager = new SandboxManager(env);
+    // Phase 2: Execute in sandbox
+    const sandboxManager = new SandboxManager(resolvedEnv);
     const { sandbox } = await sandboxManager.create(payload);
 
     const result = await sandboxManager.runAgent(sandbox, payload, async (msg) => {

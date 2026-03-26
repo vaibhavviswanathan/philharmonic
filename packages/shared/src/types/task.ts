@@ -20,6 +20,7 @@ export interface Subtask {
 
 export interface Task {
   id: string;
+  projectId: string;
   repoUrl: string;
   description: string;
   status: TaskStatus;

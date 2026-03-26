@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { createTask } from "../api.js";
+import { createProject } from "../api.js";
 
-export function NewTaskForm({ onCreated }: { onCreated: () => void }) {
+export function NewProjectForm({ onCreated }: { onCreated: () => void }) {
+  const [name, setName] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
-  const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -12,9 +12,9 @@ export function NewTaskForm({ onCreated }: { onCreated: () => void }) {
     setLoading(true);
     setError("");
     try {
-      await createTask(repoUrl, description);
+      await createProject(name, repoUrl);
+      setName("");
       setRepoUrl("");
-      setDescription("");
       onCreated();
     } catch (err) {
       setError(String(err));
@@ -25,7 +25,15 @@ export function NewTaskForm({ onCreated }: { onCreated: () => void }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-3 p-4 bg-gray-900 rounded-lg border border-gray-800">
-      <h2 className="text-lg font-semibold">New Task</h2>
+      <h2 className="text-lg font-semibold">Add Project</h2>
+      <input
+        type="text"
+        placeholder="Project name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        required
+        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
+      />
       <input
         type="url"
         placeholder="https://github.com/org/repo"
@@ -34,21 +42,13 @@ export function NewTaskForm({ onCreated }: { onCreated: () => void }) {
         required
         className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
       />
-      <textarea
-        placeholder="Describe the task..."
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        required
-        rows={3}
-        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
-      />
       {error && <p className="text-red-400 text-sm">{error}</p>}
       <button
         type="submit"
         disabled={loading}
         className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm font-medium"
       >
-        {loading ? "Submitting..." : "Submit Task"}
+        {loading ? "Adding..." : "Add Project"}
       </button>
     </form>
   );

@@ -6,6 +6,7 @@ export type EventType =
   | "sandbox_stopped"
   | "agent_log"
   | "pr_opened"
+  | "project_created"
   | "error";
 
 export interface PhilEvent {
