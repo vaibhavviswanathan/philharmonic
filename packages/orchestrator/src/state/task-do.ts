@@ -17,7 +17,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
+        project_id TEXT NOT NULL DEFAULT '',
         repo_url TEXT NOT NULL,
         description TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued',
@@ -54,6 +54,13 @@ export class TaskCoordinator extends DurableObject<Env> {
         value TEXT NOT NULL
       );
     `);
+
+    // Migrate existing tasks table: add project_id if missing
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      // Column already exists
+    }
   }
 
   constructor(ctx: DurableObjectState, env: Env) {

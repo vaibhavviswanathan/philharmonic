@@ -14,8 +14,11 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pnpm and the Anthropic SDK globally (for the agent)
-RUN npm install -g pnpm @anthropic-ai/sdk
+# Install pnpm globally
+RUN npm install -g pnpm
 
 WORKDIR /workspace
 EXPOSE 8080
+
+# Keep the container alive for the Sandbox SDK to exec into
+CMD ["node", "-e", "const http = require('http'); http.createServer((_, res) => res.end('ok')).listen(8080)"]
