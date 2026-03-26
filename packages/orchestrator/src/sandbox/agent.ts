@@ -75,7 +75,7 @@ const TOOLS: Anthropic.Messages.Tool[] = [
 ];
 
 function buildSystemPrompt(payload: DispatchPayload): string {
-  return `You are Phil's coding agent. Your task is to implement code changes, write tests, and open a pull request.
+  return `You are Phil's coding agent. Your task is to implement code changes and open a pull request.
 
 ## Task context
 - Branch: ${payload.branchName}
@@ -88,18 +88,20 @@ ${payload.repoContext.packageManager ? `- Package manager: ${payload.repoContext
 ${payload.subtasks.map((s, i) => `${i + 1}. [${s.id}] ${s.description}\n   Files: ${s.fileTargets.join(", ") || "TBD"}`).join("\n")}
 
 ## Instructions
-1. Work through each subtask in order
-2. After implementing each subtask, commit your changes with a clear message
-3. Write tests alongside your implementation
-4. Run the test suite to verify your changes
-5. Once all subtasks are complete, push to the branch and open a PR
-6. The PR description should explain what changed, why, and include test results
+1. Read the relevant files to understand the project structure
+2. Implement each subtask
+3. Commit your changes with a clear message
+4. Push to the branch using git_push
+5. Open a PR using github_pr
 
 ## Rules
+- Be efficient: read only the files you need, don't explore excessively
 - Never force-push
-- Commit after each logical unit of work
-- Run tests before pushing
-- The PR title should be concise and descriptive
+- Do NOT run pnpm install, npm install, pip install, or any package install commands unless your task specifically requires adding a new dependency
+- Do NOT run build, test, lint, or typecheck commands unless the task specifically requires code changes that could break them
+- For documentation-only tasks (README, CONTRIBUTING, etc.), just write the file, commit, push, and open a PR
+- Keep the PR title concise and descriptive
+- Keep the PR body brief: what changed and why
 `;
 }
 
@@ -160,9 +162,15 @@ export async function runAgentLoop(
       try {
         const result = await executeTool(sandbox, toolUse.name, input, env);
 
-        if (toolUse.name === "github_pr" && typeof result === "string" && result.includes("github.com")) {
-          prUrl = result;
-          await onLog(`PR created: ${prUrl}`);
+        if (toolUse.name === "github_pr" && typeof result === "string") {
+          // Extract PR URL from gh output (e.g., "https://github.com/user/repo/pull/1")
+          const urlMatch = result.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/);
+          if (urlMatch) {
+            prUrl = urlMatch[0];
+            await onLog(`PR created: ${prUrl}`);
+          } else {
+            await onLog(`PR result: ${result.slice(0, 200)}`);
+          }
         }
 
         toolResults.push({
@@ -206,7 +214,10 @@ async function executeTool(
       return `Written to ${input.path}`;
     }
     case "shell_exec": {
-      const result = await sandbox.exec(input.command as string, { cwd: "/workspace" });
+      const result = await sandbox.exec(input.command as string, {
+        cwd: "/workspace",
+        timeout: 120_000, // 2 min for install/build commands
+      });
       const output = (result.stdout ?? "") + (result.stderr ? `\nSTDERR:\n${result.stderr}` : "");
       if (!result.success) {
         return `EXIT ${result.exitCode}\n${output}`;
@@ -228,24 +239,52 @@ async function executeTool(
     }
     case "git_push": {
       const branch = input.branch as string;
-      const result = await sandbox.exec(`git push origin ${branch}`, {
+      const token = env.GITHUB_TOKEN ?? "";
+      // Get current remote URL
+      const remoteResult = await sandbox.exec("git remote get-url origin", { cwd: "/workspace" });
+      const originalUrl = remoteResult.stdout?.trim() ?? "";
+      if (!token) {
+        return "Push failed: GITHUB_TOKEN not set";
+      }
+      // Set authenticated URL for push
+      const authedUrl = originalUrl.replace("https://", `https://x-access-token:${token}@`);
+      await sandbox.exec(`git remote set-url origin '${authedUrl}'`, { cwd: "/workspace" });
+      const pushResult = await sandbox.exec(`git push -u origin ${branch}`, {
         cwd: "/workspace",
-        env: { GITHUB_TOKEN: env.GITHUB_TOKEN },
+        timeout: 60_000,
       });
-      return result.stdout ?? result.stderr ?? "Pushed";
+      // Restore original URL (don't leak token)
+      await sandbox.exec(`git remote set-url origin '${originalUrl}'`, { cwd: "/workspace" });
+      if (!pushResult.success) {
+        return `Push failed (exit ${pushResult.exitCode}): ${pushResult.stderr ?? pushResult.stdout ?? "unknown error"}`;
+      }
+      return pushResult.stderr ?? pushResult.stdout ?? "Pushed";
     }
     case "github_pr": {
       const title = input.title as string;
       const body = input.body as string;
       const base = input.base as string | undefined;
+      const token = env.GITHUB_TOKEN ?? "";
+      // Write body and title to files to avoid shell escaping issues
+      await sandbox.writeFile("/tmp/pr-body.md", body);
+      await sandbox.writeFile("/tmp/pr-title.txt", title);
+      // Write token to file so we don't have quoting issues
+      await sandbox.writeFile("/tmp/.gh-token", token);
       const baseArg = base ? `--base ${base}` : "";
-      const result = await sandbox.exec(
-        `gh pr create --title "${title.replace(/"/g, '\\"')}" --body "${body.replace(/"/g, '\\"')}" ${baseArg}`,
-        {
-          cwd: "/workspace",
-          env: { GITHUB_TOKEN: env.GITHUB_TOKEN },
-        },
-      );
+      // Get current branch name for --head flag (gh needs this after push)
+      const branchResult = await sandbox.exec("git branch --show-current", { cwd: "/workspace" });
+      const headBranch = branchResult.stdout?.trim() ?? "";
+      const headArg = headBranch ? `--head ${headBranch}` : "";
+      const cmd = `export GH_TOKEN=$(cat /tmp/.gh-token) && gh pr create --title "$(cat /tmp/pr-title.txt)" --body-file /tmp/pr-body.md ${baseArg} ${headArg} 2>&1`;
+      const result = await sandbox.exec(cmd, {
+        cwd: "/workspace",
+        timeout: 60_000,
+      });
+      // Clean up token file
+      await sandbox.exec("rm -f /tmp/.gh-token");
+      if (!result.success) {
+        return `PR creation failed (exit ${result.exitCode}): ${result.stdout ?? ""} ${result.stderr ?? ""}`;
+      }
       return result.stdout?.trim() ?? result.stderr ?? "PR created";
     }
     default:

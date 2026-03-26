@@ -7,7 +7,7 @@ export class SandboxManager {
   constructor(private env: Env) {}
 
   async create(payload: DispatchPayload): Promise<{ sandbox: SandboxInstance; meta: Sandbox }> {
-    const sandboxId = `task-${payload.taskId}`;
+    const sandboxId = `task-${payload.taskId}`.toLowerCase();
     const sandbox = getSandbox(this.env.Sandbox, sandboxId, {
       keepAlive: true,
     });
@@ -44,7 +44,7 @@ export class SandboxManager {
   }
 
   async destroy(taskId: string): Promise<void> {
-    const sandboxId = `task-${taskId}`;
+    const sandboxId = `task-${taskId}`.toLowerCase();
     const sandbox = getSandbox(this.env.Sandbox, sandboxId);
     await sandbox.destroy();
   }
@@ -57,18 +57,23 @@ export class SandboxManager {
     repoUrl: string,
     taskId: string,
   ): Promise<{ structure: string[]; projectType: string; defaultBranch: string }> {
-    const sandboxId = `task-${taskId}`;
+    const sandboxId = `task-${taskId}`.toLowerCase();
     const sandbox = getSandbox(this.env.Sandbox, sandboxId, {
       keepAlive: true,
     });
 
-    // Clone repo
-    await sandbox.exec(`git clone --depth 1 ${repoUrl} /workspace`, {
-      env: {
-        GIT_TERMINAL_PROMPT: "0",
-        GITHUB_TOKEN: this.env.GITHUB_TOKEN,
-      },
+    // Clone repo (embed token in URL for HTTPS auth)
+    const token = this.env.GITHUB_TOKEN ?? "";
+    const authedUrl = token
+      ? repoUrl.replace("https://", `https://x-access-token:${token}@`)
+      : repoUrl;
+    await sandbox.exec(`git clone --depth 1 ${authedUrl} /workspace`, {
+      env: { GIT_TERMINAL_PROMPT: "0" },
     });
+    // Remove token from remote URL after clone
+    if (token) {
+      await sandbox.exec(`git remote set-url origin ${repoUrl}`, { cwd: "/workspace" });
+    }
 
     // Get default branch
     let defaultBranch = "main";

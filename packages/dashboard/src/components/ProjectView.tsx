@@ -2,6 +2,10 @@ import { useEffect, useState, useCallback } from "react";
 import { listTasks, createTask, type Project, type Task } from "../api.js";
 import { TaskCard } from "./TaskCard.js";
 import { TaskDetail } from "./TaskDetail.js";
+import { KanbanBoard } from "./KanbanBoard.js";
+import { DependencyGraph } from "./DependencyGraph.js";
+
+type ViewMode = "list" | "kanban" | "graph";
 
 export function ProjectView({
   project,
@@ -15,6 +19,7 @@ export function ProjectView({
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("list");
 
   const refresh = useCallback(() => {
     listTasks(project.id).then(setTasks).catch(console.error);
@@ -82,20 +87,87 @@ export function ProjectView({
       </form>
 
       <div className="space-y-3">
-        <h3 className="text-sm font-semibold">
-          Tasks {tasks.length > 0 && `(${tasks.length})`}
-        </h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold">
+            Tasks {tasks.length > 0 && `(${tasks.length})`}
+          </h3>
+          <ViewToggle viewMode={viewMode} onChange={setViewMode} />
+        </div>
+
         {tasks.length === 0 && (
           <p className="text-gray-500 text-sm">No tasks yet. Submit one above.</p>
         )}
-        {tasks.map((task) => (
-          <TaskCard
-            key={task.id}
-            task={task}
-            onClick={() => setSelectedTaskId(task.id)}
+
+        {tasks.length > 0 && viewMode === "list" && (
+          <div className="space-y-3">
+            {tasks.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                onClick={() => setSelectedTaskId(task.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        {tasks.length > 0 && viewMode === "kanban" && (
+          <KanbanBoard
+            tasks={tasks}
+            onTaskClick={(id) => setSelectedTaskId(id)}
           />
-        ))}
+        )}
+
+        {tasks.length > 0 && viewMode === "graph" && (
+          <DependencyGraph
+            tasks={tasks}
+            onTaskClick={(id) => setSelectedTaskId(id)}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+function ViewToggle({
+  viewMode,
+  onChange,
+}: {
+  viewMode: ViewMode;
+  onChange: (mode: ViewMode) => void;
+}) {
+  const modes: { mode: ViewMode; label: string; icon: string }[] = [
+    { mode: "list", label: "List", icon: "M4 6h16M4 12h16M4 18h16" },
+    { mode: "kanban", label: "Kanban", icon: "M9 4H5a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V5a1 1 0 00-1-1zm0 10H5a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1zm10-10h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V5a1 1 0 00-1-1zm0 10h-4a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1v-4a1 1 0 00-1-1z" },
+    { mode: "graph", label: "Graph", icon: "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" },
+  ];
+
+  return (
+    <div className="flex bg-gray-800 rounded-md p-0.5 gap-0.5">
+      {modes.map(({ mode, label, icon }) => (
+        <button
+          key={mode}
+          onClick={() => onChange(mode)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+            viewMode === mode
+              ? "bg-gray-700 text-white"
+              : "text-gray-400 hover:text-gray-200"
+          }`}
+          title={label}
+        >
+          <svg
+            className="w-3.5 h-3.5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d={icon} />
+          </svg>
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

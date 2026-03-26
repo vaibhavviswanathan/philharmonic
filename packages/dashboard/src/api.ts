@@ -27,6 +27,7 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  blockedBy?: string;
 }
 
 export interface Subtask {

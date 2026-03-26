@@ -1,6 +1,8 @@
 export type TaskStatus =
   | "queued"
   | "planning"
+  | "planned"
+  | "blocked"
   | "running"
   | "success"
   | "failed"
@@ -32,4 +34,6 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  /** ID of the task blocking this one (touch-set conflict) */
+  blockedBy?: string;
 }

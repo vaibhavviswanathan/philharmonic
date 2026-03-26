@@ -1,6 +1,8 @@
 const colors: Record<string, string> = {
   queued: "bg-gray-600",
   planning: "bg-blue-600",
+  planned: "bg-indigo-600",
+  blocked: "bg-orange-600",
   running: "bg-yellow-600",
   success: "bg-green-600",
   failed: "bg-red-600",

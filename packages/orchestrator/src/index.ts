@@ -14,7 +14,6 @@ import {
 } from "@phil/shared";
 import type { Env } from "./env.js";
 import { TaskCoordinator } from "./state/task-do.js";
-import { planTask } from "./planner/planner.js";
 import { SandboxManager } from "./sandbox/manager.js";
 
 export { TaskCoordinator };
@@ -32,16 +31,6 @@ function getCoordinator(env: Env): DurableObjectStub {
 
 async function doRpc<T>(stub: DurableObjectStub, method: string, ...args: unknown[]): Promise<T> {
   return (stub as unknown as Record<string, (...a: unknown[]) => Promise<T>>)[method](...args);
-}
-
-/** Resolve tokens: DO settings override env vars */
-async function resolveSecrets(env: Env): Promise<{ anthropicApiKey: string; githubToken: string }> {
-  const coordinator = getCoordinator(env);
-  const settings = await doRpc<{ anthropicApiKey?: string; githubToken?: string }>(coordinator, "getSettings");
-  return {
-    anthropicApiKey: settings.anthropicApiKey || env.ANTHROPIC_API_KEY || "",
-    githubToken: settings.githubToken || env.GITHUB_TOKEN || "",
-  };
 }
 
 // --- Settings API ---
@@ -140,8 +129,8 @@ app.post("/v1/tasks", async (c) => {
 
   await doRpc(coordinator, "createTask", task);
 
-  // Run planning + execution asynchronously
-  c.executionCtx.waitUntil(runTask(task, c.env));
+  // Enqueue task for execution in DO alarm (gets 15min wall-clock time)
+  await doRpc(coordinator, "enqueueTask", task.id);
 
   return c.json(task, 201);
 });
@@ -158,6 +147,14 @@ app.get("/v1/tasks/:id", async (c) => {
   const task = await doRpc<Task | null>(coordinator, "getTask", c.req.param("id"));
   if (!task) return c.json({ error: "Task not found" }, 404);
   return c.json(task);
+});
+
+app.get("/v1/tasks/:id/logs", async (c) => {
+  const coordinator = getCoordinator(c.env);
+  const logs = await doRpc<Array<{ message: string; level: string; timestamp: string }>>(
+    coordinator, "getLogs", c.req.param("id"),
+  );
+  return c.json(logs);
 });
 
 app.delete("/v1/tasks/:id", async (c) => {
@@ -251,79 +248,39 @@ app.post("/internal/sandboxes/:taskId/logs", async (c) => {
   return c.json({ ok: true });
 });
 
+// --- GitHub Webhook (PR merge → rebase running tasks) ---
+
+app.post("/webhooks/github", async (c) => {
+  const event = c.req.header("X-GitHub-Event");
+  if (event !== "pull_request") {
+    return c.json({ ok: true, skipped: true });
+  }
+
+  const body = await c.req.json();
+  const action = body.action as string;
+  const pr = body.pull_request as Record<string, unknown> | undefined;
+
+  if (action !== "closed" || !pr || !pr.merged) {
+    return c.json({ ok: true, skipped: true });
+  }
+
+  // A PR was merged — find running tasks on this repo and trigger rebase
+  const repoUrl = (body.repository as Record<string, unknown>)?.html_url as string;
+  const mergedBranch = pr.head_ref as string ?? (pr.head as Record<string, unknown>)?.ref as string ?? "";
+  const prNumber = pr.number as number;
+
+  if (!repoUrl) return c.json({ error: "Missing repo URL" }, 400);
+
+  const coordinator = getCoordinator(c.env);
+  const rebased = await doRpc<string[]>(coordinator, "triggerRebase", repoUrl, mergedBranch, prNumber);
+
+  return c.json({ ok: true, rebasedTasks: rebased });
+});
+
 app.get("/health", (c) => c.json({ status: "ok" }));
 
-// --- Task execution pipeline ---
 
-async function runTask(task: Task, env: Env): Promise<void> {
-  const coordinator = getCoordinator(env);
 
-  // Resolve secrets from DO settings (with env fallback)
-  const secrets = await resolveSecrets(env);
-  if (!secrets.anthropicApiKey) {
-    await doRpc(coordinator, "updateTask", task.id, {
-      status: "failed",
-      error: "ANTHROPIC_API_KEY not configured. Go to Settings to add it.",
-    });
-    return;
-  }
-  if (!secrets.githubToken) {
-    await doRpc(coordinator, "updateTask", task.id, {
-      status: "failed",
-      error: "GITHUB_TOKEN not configured. Go to Settings to add it.",
-    });
-    return;
-  }
-
-  // Build an env-like object with resolved secrets
-  const resolvedEnv: Env = {
-    ...env,
-    ANTHROPIC_API_KEY: secrets.anthropicApiKey,
-    GITHUB_TOKEN: secrets.githubToken,
-  };
-
-  try {
-    // Phase 1: Planning
-    await doRpc(coordinator, "updateTask", task.id, { status: "planning" });
-    await doRpc(coordinator, "appendLog", task.id, "", "Starting planning phase...", "info");
-
-    const payload = await planTask(task.id, task.repoUrl, task.description, resolvedEnv);
-
-    // Update task with plan results
-    await doRpc(coordinator, "updateTask", task.id, {
-      status: "running",
-      branchName: payload.branchName,
-      subtasks: payload.subtasks,
-      touchSet: payload.touchSet,
-    });
-    await doRpc(coordinator, "appendLog", task.id, "", `Plan created: ${payload.subtasks.length} subtasks`, "info");
-
-    // Phase 2: Execute in sandbox
-    const sandboxManager = new SandboxManager(resolvedEnv);
-    const { sandbox } = await sandboxManager.create(payload);
-
-    const result = await sandboxManager.runAgent(sandbox, payload, async (msg) => {
-      await doRpc(coordinator, "appendLog", task.id, `task-${task.id}`, msg, "info");
-    });
-
-    // Mark success and record PR URL
-    await doRpc(coordinator, "updateTask", task.id, {
-      status: "success",
-      prUrl: result.prUrl,
-    });
-    await doRpc(coordinator, "appendLog", task.id, "", "Task completed successfully", "info");
-
-    // Tear down sandbox
-    await sandboxManager.destroy(task.id).catch(() => {});
-  } catch (err) {
-    console.error(`Task ${task.id} failed:`, err);
-    await doRpc(coordinator, "updateTask", task.id, {
-      status: "failed",
-      error: String(err),
-    });
-    await doRpc(coordinator, "appendLog", task.id, "", `Task failed: ${err}`, "error");
-  }
-}
 
 // --- Worker export ---
 

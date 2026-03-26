@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Task, TaskStatus, Subtask, Project, PhilEvent } from "@phil/shared";
+import type { Task, TaskStatus, Subtask, Project, PhilEvent, DispatchPayload } from "@phil/shared";
 import type { Env } from "../env.js";
+import { planTask } from "../planner/planner.js";
+import { SandboxManager } from "../sandbox/manager.js";
 
 export class TaskCoordinator extends DurableObject<Env> {
   // --- SQL Schema ---
@@ -26,6 +28,7 @@ export class TaskCoordinator extends DurableObject<Env> {
         pr_url TEXT,
         pr_number INTEGER,
         error TEXT,
+        blocked_by TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -55,9 +58,14 @@ export class TaskCoordinator extends DurableObject<Env> {
       );
     `);
 
-    // Migrate existing tasks table: add project_id if missing
+    // Migrate existing tasks table: add columns if missing
     try {
       this.ctx.storage.sql.exec(`ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE tasks ADD COLUMN blocked_by TEXT`);
     } catch {
       // Column already exists
     }
@@ -198,6 +206,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     if (updates.prUrl !== undefined) { sets.push(`pr_url = ?`); params.push(updates.prUrl); }
     if (updates.prNumber !== undefined) { sets.push(`pr_number = ?`); params.push(updates.prNumber); }
     if (updates.error !== undefined) { sets.push(`error = ?`); params.push(updates.error); }
+    if (updates.blockedBy !== undefined) { sets.push(`blocked_by = ?`); params.push(updates.blockedBy ?? null); }
 
     params.push(id);
     this.ctx.storage.sql.exec(
@@ -223,6 +232,290 @@ export class TaskCoordinator extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`DELETE FROM subtasks WHERE task_id = ?`, id);
     this.ctx.storage.sql.exec(`DELETE FROM logs WHERE task_id = ?`, id);
     this.ctx.storage.sql.exec(`DELETE FROM tasks WHERE id = ?`, id);
+  }
+
+  // --- Task Execution (runs in DO alarm for long wall-clock time) ---
+
+  private static readonly MAX_CONCURRENT = 5;
+
+  async enqueueTask(taskId: string): Promise<void> {
+    const pending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+    pending.push(taskId);
+    await this.ctx.storage.put("pending_tasks", pending);
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!currentAlarm) {
+      await this.ctx.storage.setAlarm(Date.now());
+    }
+  }
+
+  async alarm(): Promise<void> {
+    const pending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+    const running = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
+
+    if (pending.length === 0 && running.length === 0) return;
+
+    // Phase 1: Plan any queued tasks that haven't been planned yet
+    const needsPlanning: string[] = [];
+    for (const taskId of pending) {
+      const task = await this.getTask(taskId);
+      if (!task || task.status === "cancelled") continue;
+      if (task.status === "queued") {
+        needsPlanning.push(taskId);
+      }
+    }
+
+    const secrets = await this.resolveSecrets();
+    if (needsPlanning.length > 0) {
+      if (!secrets.anthropicApiKey) {
+        for (const id of needsPlanning) {
+          await this.updateTask(id, { status: "failed", error: "ANTHROPIC_API_KEY not configured. Go to Settings to add it." });
+        }
+        await this.ctx.storage.put("pending_tasks", pending.filter((id) => !needsPlanning.includes(id)));
+        return;
+      }
+
+      const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
+
+      // Plan tasks sequentially (each takes ~10s, fast enough)
+      for (const taskId of needsPlanning) {
+        try {
+          await this.planSingleTask(taskId, resolvedEnv);
+        } catch (err) {
+          console.error(`Planning failed for task ${taskId}:`, err);
+          await this.updateTask(taskId, { status: "failed", error: `Planning error: ${err}` });
+          await this.appendLog(taskId, "", `Planning failed: ${err}`, "error");
+        }
+      }
+    }
+
+    // Phase 2: Dispatch planned tasks, checking for conflicts
+    const updatedPending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+    const toRun: string[] = [];
+    const stillPending: string[] = [];
+
+    for (const taskId of updatedPending) {
+      const task = await this.getTask(taskId);
+      if (!task || task.status === "cancelled" || task.status === "failed") continue;
+      if (task.status !== "planned" && task.status !== "blocked") {
+        stillPending.push(taskId);
+        continue;
+      }
+
+      if (running.length + toRun.length >= TaskCoordinator.MAX_CONCURRENT) {
+        stillPending.push(taskId);
+        continue;
+      }
+
+      // Check for touch-set conflicts with running + about-to-run tasks
+      const conflict = await this.detectConflict(taskId, task.touchSet, [...running, ...toRun]);
+      if (conflict) {
+        if (task.status !== "blocked" || task.blockedBy !== conflict.blockingTaskId) {
+          await this.updateTask(taskId, { status: "blocked", blockedBy: conflict.blockingTaskId });
+          await this.appendLog(taskId, "", `Blocked by task ${conflict.blockingTaskId} (overlapping files: ${conflict.overlappingFiles.join(", ")})`, "warn");
+          this.broadcast({
+            type: "conflict_detected",
+            taskId,
+            timestamp: new Date().toISOString(),
+            data: { blockedTaskId: taskId, blockingTaskId: conflict.blockingTaskId, overlappingFiles: conflict.overlappingFiles },
+          });
+        }
+        stillPending.push(taskId);
+      } else {
+        // Clear blocked state if it was previously blocked
+        if (task.status === "blocked") {
+          this.broadcast({
+            type: "conflict_resolved",
+            taskId,
+            timestamp: new Date().toISOString(),
+            data: { blockedTaskId: taskId, blockingTaskId: task.blockedBy ?? "", overlappingFiles: [] },
+          });
+        }
+        toRun.push(taskId);
+      }
+    }
+
+    await this.ctx.storage.put("pending_tasks", stillPending);
+    running.push(...toRun);
+    await this.ctx.storage.put("running_tasks", running);
+
+    // Phase 3: Execute non-conflicting tasks in parallel
+    if (toRun.length > 0) {
+      if (!secrets.githubToken) {
+        for (const id of toRun) {
+          await this.updateTask(id, { status: "failed", error: "GITHUB_TOKEN not configured. Go to Settings to add it." });
+        }
+      } else {
+        const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
+
+        const results = await Promise.allSettled(
+          toRun.map((taskId) => this.executePlannedTask(taskId, resolvedEnv)),
+        );
+
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (r.status === "rejected") {
+            console.error(`Task ${toRun[i]} rejected:`, r.reason);
+            try {
+              await this.updateTask(toRun[i], { status: "failed", error: `Execution error: ${r.reason}` });
+              await this.appendLog(toRun[i], "", `Task failed: ${r.reason}`, "error");
+            } catch { /* best effort */ }
+          }
+        }
+      }
+
+      // Remove completed tasks from running set + unblock waiting tasks
+      const currentRunning = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
+      const nowDone = currentRunning.filter((id) => toRun.includes(id));
+      const stillRunning = currentRunning.filter((id) => !toRun.includes(id));
+      await this.ctx.storage.put("running_tasks", stillRunning);
+
+      // Check if any blocked tasks can now proceed
+      if (nowDone.length > 0) {
+        const currentPending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+        if (currentPending.length > 0) {
+          await this.ctx.storage.setAlarm(Date.now());
+        }
+      }
+    }
+
+    // Reschedule if there are still pending tasks
+    const remaining = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+    if (remaining.length > 0) {
+      const currentAlarm = await this.ctx.storage.getAlarm();
+      if (!currentAlarm) {
+        await this.ctx.storage.setAlarm(Date.now() + 1000); // slight delay for blocked tasks
+      }
+    }
+  }
+
+  // --- Conflict Detection ---
+
+  private async detectConflict(
+    taskId: string,
+    touchSet: string[],
+    activeTaskIds: string[],
+  ): Promise<{ blockingTaskId: string; overlappingFiles: string[] } | null> {
+    if (touchSet.length === 0) return null;
+
+    for (const activeId of activeTaskIds) {
+      if (activeId === taskId) continue;
+      const activeTask = await this.getTask(activeId);
+      if (!activeTask || activeTask.touchSet.length === 0) continue;
+
+      // Same repo check — tasks on different repos can never conflict
+      // (touchSet contains relative paths, so same filename on different repos isn't a conflict)
+      // We only compare tasks on the same repo
+      const task = await this.getTask(taskId);
+      if (!task || task.repoUrl !== activeTask.repoUrl) continue;
+
+      const overlap = touchSet.filter((f) => activeTask.touchSet.includes(f));
+      if (overlap.length > 0) {
+        return { blockingTaskId: activeId, overlappingFiles: overlap };
+      }
+    }
+    return null;
+  }
+
+  // --- Rebase Support ---
+
+  async triggerRebase(repoUrl: string, mergedBranch: string, mergedPrNumber: number): Promise<string[]> {
+    // Find all running tasks on this repo that need rebasing
+    const runningIds = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
+    const rebased: string[] = [];
+
+    for (const taskId of runningIds) {
+      const task = await this.getTask(taskId);
+      if (!task || task.repoUrl !== repoUrl || task.branchName === mergedBranch) continue;
+
+      await this.appendLog(taskId, "", `Rebase needed: PR #${mergedPrNumber} (${mergedBranch}) was merged`, "warn");
+      this.broadcast({
+        type: "rebase_required",
+        taskId,
+        timestamp: new Date().toISOString(),
+        data: { targetTaskId: taskId, mergedPrNumber, mergedBranch },
+      });
+      rebased.push(taskId);
+    }
+    return rebased;
+  }
+
+  // --- Secrets ---
+
+  private async resolveSecrets(): Promise<{ anthropicApiKey: string; githubToken: string }> {
+    const settings = await this.getSettings();
+    return {
+      anthropicApiKey: settings.anthropicApiKey || this.env.ANTHROPIC_API_KEY || "",
+      githubToken: settings.githubToken || this.env.GITHUB_TOKEN || "",
+    };
+  }
+
+  // --- Task Execution Phases ---
+
+  private async planSingleTask(taskId: string, env: Env): Promise<void> {
+    const task = await this.getTask(taskId);
+    if (!task || task.status === "cancelled") return;
+
+    await this.updateTask(taskId, { status: "planning" });
+    await this.appendLog(taskId, "", "Starting planning phase...", "info");
+
+    const payload = await planTask(taskId, task.repoUrl, task.description, env);
+
+    await this.updateTask(taskId, {
+      status: "planned",
+      branchName: payload.branchName,
+      subtasks: payload.subtasks,
+      touchSet: payload.touchSet,
+    });
+    await this.appendLog(taskId, "", `Plan created: ${payload.subtasks.length} subtasks, touch set: [${payload.touchSet.join(", ")}]`, "info");
+  }
+
+  private async executePlannedTask(taskId: string, env: Env): Promise<void> {
+    const task = await this.getTask(taskId);
+    if (!task || task.status === "cancelled") return;
+
+    await this.updateTask(taskId, { status: "running", blockedBy: undefined });
+    await this.appendLog(taskId, "", "Starting execution phase...", "info");
+
+    try {
+      const payload: DispatchPayload = {
+        taskId,
+        branchName: task.branchName,
+        repoContext: {
+          repoUrl: task.repoUrl,
+          defaultBranch: "main",
+          projectType: "unknown",
+          structure: [],
+        },
+        subtasks: task.subtasks,
+        touchSet: task.touchSet,
+        callbackUrl: `${env.WORKER_URL ?? ""}/internal/sandboxes/${taskId}`,
+      };
+
+      // Re-analyze repo to get full context for the agent
+      const sandboxManager = new SandboxManager(env);
+      const repoAnalysis = await sandboxManager.analyzeRepo(task.repoUrl, taskId);
+      payload.repoContext = {
+        repoUrl: task.repoUrl,
+        defaultBranch: repoAnalysis.defaultBranch,
+        projectType: repoAnalysis.projectType,
+        structure: repoAnalysis.structure,
+      };
+
+      const { sandbox } = await sandboxManager.create(payload);
+
+      const result = await sandboxManager.runAgent(sandbox, payload, async (msg) => {
+        await this.appendLog(taskId, `task-${taskId}`, msg, "info");
+      });
+
+      await this.updateTask(taskId, { status: "success", prUrl: result.prUrl });
+      await this.appendLog(taskId, "", "Task completed successfully", "info");
+
+      await sandboxManager.destroy(taskId).catch(() => {});
+    } catch (err) {
+      console.error(`Task ${taskId} failed:`, err);
+      await this.updateTask(taskId, { status: "failed", error: String(err) });
+      await this.appendLog(taskId, "", `Task failed: ${err}`, "error");
+    }
   }
 
   // --- Logs ---
@@ -313,6 +606,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
       error: row.error as string | undefined,
+      blockedBy: row.blocked_by as string | undefined,
     };
   }
 

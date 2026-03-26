@@ -29,8 +29,15 @@ export function TaskDetail({
         const msg = (event.data.message as string) ?? JSON.stringify(event.data);
         setLogs((prev) => [...prev, msg]);
       }
-      if (event.type === "task_status_changed") {
+      if (event.type === "task_status_changed" || event.type === "conflict_detected" || event.type === "conflict_resolved") {
         getTask(taskId).then(setTask);
+      }
+      if (event.type === "conflict_detected") {
+        const files = (event.data.overlappingFiles as string[]) ?? [];
+        setLogs((prev) => [...prev, `[CONFLICT] Blocked by task ${event.data.blockingTaskId} — overlapping files: ${files.join(", ")}`]);
+      }
+      if (event.type === "rebase_required") {
+        setLogs((prev) => [...prev, `[REBASE] PR #${event.data.mergedPrNumber} merged — rebase needed`]);
       }
     });
     return unsub;
@@ -70,6 +77,11 @@ export function TaskDetail({
           >
             View Pull Request
           </a>
+        )}
+        {task.status === "blocked" && task.blockedBy && (
+          <p className="mt-2 text-sm text-orange-400">
+            Blocked by task <span className="font-mono">{task.blockedBy}</span> (touch-set conflict)
+          </p>
         )}
         {task.error && (
           <p className="mt-2 text-sm text-red-400">{task.error}</p>

@@ -19,6 +19,8 @@ export type {
   EventType,
   AgentLogEvent,
   TaskStatusEvent,
+  ConflictEvent,
+  RebaseEvent,
 } from "./types/events.js";
 
 export type {
