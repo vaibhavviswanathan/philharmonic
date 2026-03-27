@@ -4,9 +4,13 @@ export type TaskStatus =
   | "planned"
   | "blocked"
   | "running"
+  | "reviewing"
+  | "fixing"
   | "success"
   | "failed"
   | "cancelled";
+
+export type AutonomyLevel = "full" | "high" | "moderate" | "supervised";
 
 export type SubtaskStatus = "pending" | "running" | "success" | "failed";
 
@@ -36,4 +40,25 @@ export interface Task {
   error?: string;
   /** ID of the task blocking this one (touch-set conflict) */
   blockedBy?: string;
+  /** Number of review iterations completed */
+  reviewCycles?: number;
+}
+
+export interface ReviewComment {
+  id: string;
+  taskId: string;
+  prNumber: number;
+  author: string;
+  body: string;
+  path?: string;
+  line?: number;
+  createdAt: string;
+}
+
+export interface EscalationMessage {
+  id: string;
+  taskId: string;
+  from: "agent" | "user";
+  message: string;
+  createdAt: string;
 }

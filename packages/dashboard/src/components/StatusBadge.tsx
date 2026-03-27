@@ -4,6 +4,8 @@ const colors: Record<string, string> = {
   planned: "bg-indigo-600",
   blocked: "bg-orange-600",
   running: "bg-yellow-600",
+  reviewing: "bg-purple-600",
+  fixing: "bg-purple-500",
   success: "bg-green-600",
   failed: "bg-red-600",
   cancelled: "bg-gray-500",

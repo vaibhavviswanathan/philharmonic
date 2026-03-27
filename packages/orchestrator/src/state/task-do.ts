@@ -52,6 +52,26 @@ export class TaskCoordinator extends DurableObject<Env> {
         level TEXT NOT NULL DEFAULT 'info',
         timestamp TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS review_comments (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        author TEXT NOT NULL,
+        body TEXT NOT NULL,
+        path TEXT,
+        line INTEGER,
+        processed INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks(id)
+      );
+      CREATE TABLE IF NOT EXISTS escalations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks(id)
+      );
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -66,6 +86,11 @@ export class TaskCoordinator extends DurableObject<Env> {
     }
     try {
       this.ctx.storage.sql.exec(`ALTER TABLE tasks ADD COLUMN blocked_by TEXT`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE tasks ADD COLUMN review_cycles INTEGER NOT NULL DEFAULT 0`);
     } catch {
       // Column already exists
     }
@@ -207,6 +232,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     if (updates.prNumber !== undefined) { sets.push(`pr_number = ?`); params.push(updates.prNumber); }
     if (updates.error !== undefined) { sets.push(`error = ?`); params.push(updates.error); }
     if (updates.blockedBy !== undefined) { sets.push(`blocked_by = ?`); params.push(updates.blockedBy ?? null); }
+    if (updates.reviewCycles !== undefined) { sets.push(`review_cycles = ?`); params.push(updates.reviewCycles); }
 
     params.push(id);
     this.ctx.storage.sql.exec(
@@ -251,8 +277,9 @@ export class TaskCoordinator extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const pending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
     const running = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
+    const pendingReviewFixes = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
 
-    if (pending.length === 0 && running.length === 0) return;
+    if (pending.length === 0 && running.length === 0 && pendingReviewFixes.length === 0) return;
 
     // Phase 1: Plan any queued tasks that haven't been planned yet
     const needsPlanning: string[] = [];
@@ -378,12 +405,16 @@ export class TaskCoordinator extends DurableObject<Env> {
       }
     }
 
-    // Reschedule if there are still pending tasks
+    // Process any pending review fixes
+    await this.processReviewFixes();
+
+    // Reschedule if there are still pending tasks or review fixes
     const remaining = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
-    if (remaining.length > 0) {
+    const pendingReviews = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
+    if (remaining.length > 0 || pendingReviews.length > 0) {
       const currentAlarm = await this.ctx.storage.getAlarm();
       if (!currentAlarm) {
-        await this.ctx.storage.setAlarm(Date.now() + 1000); // slight delay for blocked tasks
+        await this.ctx.storage.setAlarm(Date.now() + 1000);
       }
     }
   }
@@ -507,15 +538,180 @@ export class TaskCoordinator extends DurableObject<Env> {
         await this.appendLog(taskId, `task-${taskId}`, msg, "info");
       });
 
-      await this.updateTask(taskId, { status: "success", prUrl: result.prUrl });
-      await this.appendLog(taskId, "", "Task completed successfully", "info");
+      await this.updateTask(taskId, { status: "reviewing", prUrl: result.prUrl });
+      await this.appendLog(taskId, "", "PR created — sandbox kept alive for review fixes", "info");
 
-      await sandboxManager.destroy(taskId).catch(() => {});
+      // Track that this sandbox is alive for review fixes
+      const watching = await this.ctx.storage.get<string[]>("watching_tasks") ?? [];
+      if (!watching.includes(taskId)) {
+        watching.push(taskId);
+        await this.ctx.storage.put("watching_tasks", watching);
+      }
     } catch (err) {
       console.error(`Task ${taskId} failed:`, err);
       await this.updateTask(taskId, { status: "failed", error: String(err) });
       await this.appendLog(taskId, "", `Task failed: ${err}`, "error");
     }
+  }
+
+  // --- Review Loop ---
+
+  async addReviewComment(
+    taskId: string,
+    comment: { id: string; prNumber: number; author: string; body: string; path?: string; line?: number; createdAt: string },
+  ): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO review_comments (id, task_id, pr_number, author, body, path, line, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      comment.id, taskId, comment.prNumber, comment.author, comment.body,
+      comment.path ?? null, comment.line ?? null, comment.createdAt,
+    );
+
+    this.broadcast({
+      type: "review_received",
+      taskId,
+      timestamp: comment.createdAt,
+      data: { prNumber: comment.prNumber, author: comment.author, body: comment.body, path: comment.path, line: comment.line },
+    });
+    await this.appendLog(taskId, "", `Review comment from ${comment.author}: ${comment.body.slice(0, 100)}`, "info");
+  }
+
+  async getUnprocessedReviews(taskId: string): Promise<Array<{ id: string; author: string; body: string; path?: string; line?: number }>> {
+    return this.ctx.storage.sql.exec(
+      `SELECT id, author, body, path, line FROM review_comments WHERE task_id = ? AND processed = 0 ORDER BY created_at`,
+      taskId,
+    ).toArray() as Array<{ id: string; author: string; body: string; path?: string; line?: number }>;
+  }
+
+  async markReviewsProcessed(taskId: string, reviewIds: string[]): Promise<void> {
+    for (const id of reviewIds) {
+      this.ctx.storage.sql.exec(`UPDATE review_comments SET processed = 1 WHERE id = ?`, id);
+    }
+  }
+
+  async enqueueReviewFix(taskId: string): Promise<void> {
+    const task = await this.getTask(taskId);
+    if (!task) return;
+
+    // Only process if task is in reviewing state
+    if (task.status !== "reviewing") {
+      await this.appendLog(taskId, "", `Skipping review fix — task status is ${task.status}`, "warn");
+      return;
+    }
+
+    const pending = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
+    if (!pending.includes(taskId)) {
+      pending.push(taskId);
+      await this.ctx.storage.put("pending_review_fixes", pending);
+    }
+
+    // Schedule alarm to process review fixes
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!currentAlarm) {
+      await this.ctx.storage.setAlarm(Date.now());
+    }
+  }
+
+  private async processReviewFixes(): Promise<void> {
+    const pending = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
+    if (pending.length === 0) return;
+
+    const secrets = await this.resolveSecrets();
+    if (!secrets.anthropicApiKey || !secrets.githubToken) return;
+
+    const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
+
+    // Process one review fix at a time
+    const taskId = pending.shift()!;
+    await this.ctx.storage.put("pending_review_fixes", pending);
+
+    try {
+      await this.executeReviewFix(taskId, resolvedEnv);
+    } catch (err) {
+      console.error(`Review fix failed for task ${taskId}:`, err);
+      await this.appendLog(taskId, "", `Review fix failed: ${err}`, "error");
+      // Return to reviewing state so it can try again
+      await this.updateTask(taskId, { status: "reviewing" });
+    }
+  }
+
+  private async executeReviewFix(taskId: string, env: Env): Promise<void> {
+    const task = await this.getTask(taskId);
+    if (!task) return;
+
+    const reviews = await this.getUnprocessedReviews(taskId);
+    if (reviews.length === 0) {
+      await this.appendLog(taskId, "", "No unprocessed reviews to fix", "info");
+      return;
+    }
+
+    await this.updateTask(taskId, { status: "fixing" });
+    this.broadcast({ type: "review_fix_started", taskId, timestamp: new Date().toISOString(), data: { reviewCount: reviews.length } });
+    await this.appendLog(taskId, "", `Processing ${reviews.length} review comment(s)...`, "info");
+
+    const sandboxManager = new SandboxManager(env);
+    // Get existing sandbox (still alive from initial run)
+    const sandboxId = `task-${taskId}`.toLowerCase();
+    const { getSandbox } = await import("@cloudflare/sandbox");
+    const sandbox = getSandbox(env.Sandbox, sandboxId, { keepAlive: true });
+
+    // Build review context for the agent
+    const reviewContext = reviews.map((r) => {
+      let ctx = `**${r.author}**: ${r.body}`;
+      if (r.path) ctx += `\n  File: ${r.path}${r.line ? `:${r.line}` : ""}`;
+      return ctx;
+    }).join("\n\n");
+
+    // Run review-fix agent loop
+    const { runReviewFixLoop } = await import("../sandbox/review-agent.js");
+    const result = await runReviewFixLoop(sandbox, task, reviewContext, env, async (msg) => {
+      await this.appendLog(taskId, `task-${taskId}`, msg, "info");
+    });
+
+    // Mark reviews as processed
+    await this.markReviewsProcessed(taskId, reviews.map((r) => r.id));
+
+    const cycles = (task.reviewCycles ?? 0) + 1;
+    await this.updateTask(taskId, { status: "reviewing", reviewCycles: cycles });
+    this.broadcast({ type: "review_fix_completed", taskId, timestamp: new Date().toISOString(), data: { cycles, pushed: result.pushed } });
+    await this.appendLog(taskId, "", `Review fix cycle ${cycles} complete${result.pushed ? " — changes pushed" : ""}`, "info");
+  }
+
+  // --- Escalation ---
+
+  async addEscalation(taskId: string, from: "agent" | "user", message: string): Promise<void> {
+    const timestamp = new Date().toISOString();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO escalations (task_id, sender, message, created_at) VALUES (?, ?, ?, ?)`,
+      taskId, from, message, timestamp,
+    );
+    const eventType = from === "agent" ? "escalation" : "escalation_response";
+    this.broadcast({ type: eventType, taskId, timestamp, data: { from, message } });
+    await this.appendLog(taskId, "", `[${from === "agent" ? "ESCALATION" : "USER RESPONSE"}] ${message}`, from === "agent" ? "warn" : "info");
+  }
+
+  async getEscalations(taskId: string): Promise<Array<{ sender: string; message: string; createdAt: string }>> {
+    return this.ctx.storage.sql.exec(
+      `SELECT sender, message, created_at as createdAt FROM escalations WHERE task_id = ? ORDER BY id`,
+      taskId,
+    ).toArray() as Array<{ sender: string; message: string; createdAt: string }>;
+  }
+
+  async resolveTask(taskId: string): Promise<void> {
+    // Mark a reviewing task as fully done, destroy sandbox
+    const task = await this.getTask(taskId);
+    if (!task) return;
+
+    await this.updateTask(taskId, { status: "success" });
+    await this.appendLog(taskId, "", "Task resolved — sandbox destroyed", "info");
+
+    // Remove from watching list
+    const watching = await this.ctx.storage.get<string[]>("watching_tasks") ?? [];
+    await this.ctx.storage.put("watching_tasks", watching.filter((id) => id !== taskId));
+
+    // Destroy sandbox
+    const sandboxManager = new SandboxManager(this.env);
+    await sandboxManager.destroy(taskId).catch(() => {});
   }
 
   // --- Logs ---
@@ -607,6 +803,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       updatedAt: row.updated_at as string,
       error: row.error as string | undefined,
       blockedBy: row.blocked_by as string | undefined,
+      reviewCycles: (row.review_cycles as number) || 0,
     };
   }
 

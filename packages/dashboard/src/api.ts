@@ -28,6 +28,7 @@ export interface Task {
   updatedAt: string;
   error?: string;
   blockedBy?: string;
+  reviewCycles?: number;
 }
 
 export interface Subtask {
@@ -120,6 +121,34 @@ export async function getTask(id: string): Promise<Task> {
 export async function cancelTask(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to cancel task: ${res.statusText}`);
+}
+
+export async function resolveTask(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${id}/resolve`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to resolve task: ${res.statusText}`);
+}
+
+// --- Messages (Escalation / Chat) ---
+
+export interface Message {
+  sender: string;
+  message: string;
+  createdAt: string;
+}
+
+export async function getMessages(taskId: string): Promise<Message[]> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/messages`);
+  if (!res.ok) throw new Error(`Failed to get messages: ${res.statusText}`);
+  return res.json();
+}
+
+export async function sendMessage(taskId: string, message: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok) throw new Error(`Failed to send message: ${res.statusText}`);
 }
 
 // --- WebSocket ---

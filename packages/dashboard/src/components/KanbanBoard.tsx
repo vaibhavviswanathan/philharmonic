@@ -7,6 +7,8 @@ const COLUMNS: { status: string; label: string; color: string }[] = [
   { status: "planned", label: "Planned", color: "border-indigo-600" },
   { status: "blocked", label: "Blocked", color: "border-orange-600" },
   { status: "running", label: "Running", color: "border-yellow-600" },
+  { status: "reviewing", label: "Reviewing", color: "border-purple-600" },
+  { status: "fixing", label: "Fixing", color: "border-purple-500" },
   { status: "success", label: "Done", color: "border-green-600" },
   { status: "failed", label: "Failed", color: "border-red-600" },
 ];

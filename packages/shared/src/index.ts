@@ -3,6 +3,9 @@ export type {
   TaskStatus,
   Subtask,
   SubtaskStatus,
+  AutonomyLevel,
+  ReviewComment,
+  EscalationMessage,
 } from "./types/task.js";
 
 export type { Project } from "./types/project.js";
@@ -21,6 +24,8 @@ export type {
   TaskStatusEvent,
   ConflictEvent,
   RebaseEvent,
+  ReviewEvent,
+  EscalationEvent,
 } from "./types/events.js";
 
 export type {

@@ -11,6 +11,11 @@ export type EventType =
   | "conflict_detected"
   | "conflict_resolved"
   | "rebase_required"
+  | "review_received"
+  | "review_fix_started"
+  | "review_fix_completed"
+  | "escalation"
+  | "escalation_response"
   | "error";
 
 export interface PhilEvent {
@@ -52,5 +57,24 @@ export interface RebaseEvent extends PhilEvent {
     targetTaskId: string;
     mergedPrNumber: number;
     mergedBranch: string;
+  };
+}
+
+export interface ReviewEvent extends PhilEvent {
+  type: "review_received";
+  data: {
+    prNumber: number;
+    author: string;
+    body: string;
+    path?: string;
+    line?: number;
+  };
+}
+
+export interface EscalationEvent extends PhilEvent {
+  type: "escalation" | "escalation_response";
+  data: {
+    from: "agent" | "user";
+    message: string;
   };
 }

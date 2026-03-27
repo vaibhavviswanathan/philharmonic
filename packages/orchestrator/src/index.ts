@@ -252,29 +252,180 @@ app.post("/internal/sandboxes/:taskId/logs", async (c) => {
 
 app.post("/webhooks/github", async (c) => {
   const event = c.req.header("X-GitHub-Event");
-  if (event !== "pull_request") {
-    return c.json({ ok: true, skipped: true });
-  }
-
   const body = await c.req.json();
-  const action = body.action as string;
-  const pr = body.pull_request as Record<string, unknown> | undefined;
+  const coordinator = getCoordinator(c.env);
 
-  if (action !== "closed" || !pr || !pr.merged) {
-    return c.json({ ok: true, skipped: true });
+  // --- PR review comments (pull_request_review) ---
+  if (event === "pull_request_review" && body.action === "submitted") {
+    const review = body.review as Record<string, unknown>;
+    const pr = body.pull_request as Record<string, unknown>;
+    const reviewBody = (review?.body as string) ?? "";
+
+    // Skip empty reviews or approvals without comments
+    if (!reviewBody.trim()) return c.json({ ok: true, skipped: true });
+
+    const branchName = (pr?.head as Record<string, unknown>)?.ref as string ?? "";
+    const prNumber = pr?.number as number;
+    const repoUrl = (body.repository as Record<string, unknown>)?.html_url as string;
+
+    // Find the task by branch name
+    const task = await findTaskByBranch(coordinator, repoUrl, branchName);
+    if (!task) return c.json({ ok: true, skipped: true, reason: "no matching task" });
+
+    const commentId = `review-${review?.id}`;
+    await doRpc(coordinator, "addReviewComment", task.id, {
+      id: commentId,
+      prNumber,
+      author: (review?.user as Record<string, unknown>)?.login as string ?? "unknown",
+      body: reviewBody,
+      createdAt: (review?.submitted_at as string) ?? new Date().toISOString(),
+    });
+
+    // Queue review fix
+    await doRpc(coordinator, "enqueueReviewFix", task.id);
+    return c.json({ ok: true, taskId: task.id });
   }
 
-  // A PR was merged — find running tasks on this repo and trigger rebase
-  const repoUrl = (body.repository as Record<string, unknown>)?.html_url as string;
-  const mergedBranch = pr.head_ref as string ?? (pr.head as Record<string, unknown>)?.ref as string ?? "";
-  const prNumber = pr.number as number;
+  // --- PR review comments (individual line comments via pull_request_review_comment) ---
+  if (event === "pull_request_review_comment" && body.action === "created") {
+    const comment = body.comment as Record<string, unknown>;
+    const pr = body.pull_request as Record<string, unknown>;
+    const branchName = (pr?.head as Record<string, unknown>)?.ref as string ?? "";
+    const prNumber = pr?.number as number;
+    const repoUrl = (body.repository as Record<string, unknown>)?.html_url as string;
 
-  if (!repoUrl) return c.json({ error: "Missing repo URL" }, 400);
+    const task = await findTaskByBranch(coordinator, repoUrl, branchName);
+    if (!task) return c.json({ ok: true, skipped: true, reason: "no matching task" });
+
+    const commentId = `comment-${comment?.id}`;
+    await doRpc(coordinator, "addReviewComment", task.id, {
+      id: commentId,
+      prNumber,
+      author: (comment?.user as Record<string, unknown>)?.login as string ?? "unknown",
+      body: comment?.body as string ?? "",
+      path: comment?.path as string,
+      line: comment?.line as number ?? comment?.original_line as number,
+      createdAt: (comment?.created_at as string) ?? new Date().toISOString(),
+    });
+
+    // Queue review fix
+    await doRpc(coordinator, "enqueueReviewFix", task.id);
+    return c.json({ ok: true, taskId: task.id });
+  }
+
+  // --- Issue comments on PRs ---
+  if (event === "issue_comment" && body.action === "created") {
+    const issue = body.issue as Record<string, unknown>;
+    // Only process comments on PRs (issues with pull_request field)
+    if (!issue?.pull_request) return c.json({ ok: true, skipped: true });
+
+    const comment = body.comment as Record<string, unknown>;
+    const repoUrl = (body.repository as Record<string, unknown>)?.html_url as string;
+    const prNumber = issue?.number as number;
+
+    // We need to find the task by PR number
+    const task = await findTaskByPrNumber(coordinator, repoUrl, prNumber);
+    if (!task) return c.json({ ok: true, skipped: true, reason: "no matching task" });
+
+    // Skip comments from the bot itself
+    const author = (comment?.user as Record<string, unknown>)?.login as string ?? "";
+    if (author === "phil-agent" || author.includes("[bot]")) return c.json({ ok: true, skipped: true });
+
+    const commentId = `issue-comment-${comment?.id}`;
+    await doRpc(coordinator, "addReviewComment", task.id, {
+      id: commentId,
+      prNumber,
+      author,
+      body: comment?.body as string ?? "",
+      createdAt: (comment?.created_at as string) ?? new Date().toISOString(),
+    });
+
+    await doRpc(coordinator, "enqueueReviewFix", task.id);
+    return c.json({ ok: true, taskId: task.id });
+  }
+
+  // --- PR merged → rebase ---
+  if (event === "pull_request") {
+    const action = body.action as string;
+    const pr = body.pull_request as Record<string, unknown> | undefined;
+
+    if (action === "closed" && pr?.merged) {
+      const repoUrl = (body.repository as Record<string, unknown>)?.html_url as string;
+      const mergedBranch = (pr?.head as Record<string, unknown>)?.ref as string ?? "";
+      const prNumber = pr?.number as number;
+
+      if (!repoUrl) return c.json({ error: "Missing repo URL" }, 400);
+
+      const coordinator2 = getCoordinator(c.env);
+
+      // Also mark the task as success (PR merged = done)
+      const task = await findTaskByBranch(coordinator2, repoUrl, mergedBranch);
+      if (task && (task.status === "reviewing" || task.status === "fixing")) {
+        await doRpc(coordinator2, "resolveTask", task.id);
+      }
+
+      const rebased = await doRpc<string[]>(coordinator2, "triggerRebase", repoUrl, mergedBranch, prNumber);
+      return c.json({ ok: true, rebasedTasks: rebased });
+    }
+  }
+
+  return c.json({ ok: true, skipped: true });
+});
+
+/** Helper: find a task by its branch name */
+async function findTaskByBranch(coordinator: DurableObjectStub, repoUrl: string, branchName: string): Promise<Task | null> {
+  const tasks = await doRpc<Task[]>(coordinator, "listTasks");
+  return tasks.find((t) => t.repoUrl === repoUrl && t.branchName === branchName) ?? null;
+}
+
+/** Helper: find a task by PR number */
+async function findTaskByPrNumber(coordinator: DurableObjectStub, repoUrl: string, prNumber: number): Promise<Task | null> {
+  const tasks = await doRpc<Task[]>(coordinator, "listTasks");
+  return tasks.find((t) => t.repoUrl === repoUrl && t.prNumber === prNumber) ?? null;
+}
+
+// --- Escalation API ---
+
+app.post("/v1/tasks/:id/messages", async (c) => {
+  const taskId = c.req.param("id");
+  const body = await c.req.json();
+  const message = body.message as string;
+  if (!message) return c.json({ error: "message is required" }, 400);
 
   const coordinator = getCoordinator(c.env);
-  const rebased = await doRpc<string[]>(coordinator, "triggerRebase", repoUrl, mergedBranch, prNumber);
+  await doRpc(coordinator, "addEscalation", taskId, "user", message);
 
-  return c.json({ ok: true, rebasedTasks: rebased });
+  // If the task is reviewing, queue a review fix with the user's message
+  const task = await doRpc<Task | null>(coordinator, "getTask", taskId);
+  if (task && task.status === "reviewing") {
+    // Add user message as a review comment so the agent processes it
+    await doRpc(coordinator, "addReviewComment", taskId, {
+      id: `user-msg-${Date.now()}`,
+      prNumber: task.prNumber ?? 0,
+      author: "user",
+      body: message,
+      createdAt: new Date().toISOString(),
+    });
+    await doRpc(coordinator, "enqueueReviewFix", taskId);
+  }
+
+  return c.json({ ok: true });
+});
+
+app.get("/v1/tasks/:id/messages", async (c) => {
+  const taskId = c.req.param("id");
+  const coordinator = getCoordinator(c.env);
+  const escalations = await doRpc<Array<{ sender: string; message: string; createdAt: string }>>(
+    coordinator, "getEscalations", taskId,
+  );
+  return c.json(escalations);
+});
+
+app.post("/v1/tasks/:id/resolve", async (c) => {
+  const taskId = c.req.param("id");
+  const coordinator = getCoordinator(c.env);
+  await doRpc(coordinator, "resolveTask", taskId);
+  return c.json({ ok: true });
 });
 
 app.get("/health", (c) => c.json({ status: "ok" }));
