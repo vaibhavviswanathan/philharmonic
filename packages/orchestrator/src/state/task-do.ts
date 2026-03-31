@@ -1105,6 +1105,12 @@ export class TaskCoordinator extends DurableObject<Env> {
     // Destroy sandbox
     const sandboxManager = new SandboxManager(this.env);
     await sandboxManager.destroy(taskId).catch(() => {});
+
+    // Trigger alarm to unblock any tasks depending on this one
+    const pending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+    if (pending.length > 0) {
+      await this.ctx.storage.setAlarm(Date.now());
+    }
   }
 
   async removeFromRunning(taskId: string): Promise<void> {
