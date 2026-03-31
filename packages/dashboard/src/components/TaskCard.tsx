@@ -1,4 +1,5 @@
 import { resolvePreviewUrl, type Task } from "../api.js";
+import { RebaseButton } from "./RebaseButton.js";
 import { StatusBadge } from "./StatusBadge.js";
 
 export function TaskCard({
@@ -61,6 +62,9 @@ export function TaskCard({
           >
             Preview
           </a>
+        )}
+        {task.status === "blocked" && (
+          <RebaseButton taskId={task.id} />
         )}
       </div>
     </div>

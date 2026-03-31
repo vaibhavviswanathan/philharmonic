@@ -168,6 +168,15 @@ export async function closeTask(id: string): Promise<void> {
   }
 }
 
+export async function rebaseTask(id: string): Promise<Task> {
+  const res = await fetch(`${API_BASE}/tasks/${id}/rebase`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+  return res.json();
+}
+
 // --- Plan Approval ---
 
 export async function approvePlan(taskId: string): Promise<void> {

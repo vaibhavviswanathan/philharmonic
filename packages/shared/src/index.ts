@@ -1,5 +1,6 @@
 export type {
   Task,
+  TaskType,
   TaskStatus,
   Subtask,
   SubtaskStatus,

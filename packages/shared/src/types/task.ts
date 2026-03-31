@@ -1,3 +1,5 @@
+export type TaskType = "feature" | "rebase";
+
 export type TaskStatus =
   | "backlog"
   | "queued"
@@ -49,6 +51,8 @@ export interface Task {
   dependsOn?: string[];
   /** Number of review iterations completed */
   reviewCycles?: number;
+  /** Whether this is a regular feature task or a rebase task */
+  taskType?: TaskType;
 }
 
 export interface ReviewComment {
