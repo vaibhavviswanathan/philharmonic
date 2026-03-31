@@ -705,21 +705,55 @@ app.post("/v1/tasks/:id/expose", async (c) => {
       await sandbox.exec("cd /workspace && npm install --no-audit --no-fund 2>&1", { cwd: "/workspace" });
     }
 
-    // Start server if not running
-    const serverCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
+    // Kill any stale serve/static-file processes, then start the correct server
+    await sandbox.exec("pkill -f 'serve.*-l' 2>/dev/null || true");
+    await sandbox.exec("pkill -f 'npx.*serve' 2>/dev/null || true");
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // Start server — prefer serving pre-built dist/ if available
+    let serverCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
     if (!serverCheck.stdout.includes("LISTENING")) {
-      const pkgCheck = await sandbox.exec("cat /workspace/package.json 2>/dev/null || true");
-      if (pkgCheck.stdout.includes("{")) {
-        const startCmd = pkgCheck.stdout.includes('"dev"')
-          ? "npm run dev -- --port 8080 --host 0.0.0.0"
-          : pkgCheck.stdout.includes('"start"')
-            ? "PORT=8080 npm start"
-            : "npx -y serve /workspace -l 8080";
+      // Strategy 1: pre-built dist/
+      const findDist = await sandbox.exec(
+        `find /workspace -maxdepth 4 -path '*/dist/index.html' -not -path '*/node_modules/*' 2>/dev/null | head -1 || true`,
+      );
+      if (findDist.success && findDist.stdout.trim()) {
+        const distDir = findDist.stdout.trim().replace(/\/index\.html$/, "");
         await sandbox.exec(
-          `bash -c 'cd /workspace && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
-          { env: { PORT: "8080", HOME: "/root" } },
+          `bash -c 'npx -y serve ${distDir} -l 8080 > /tmp/dev-server.log 2>&1 &'`,
+          { env: { HOME: "/root" } },
         );
-        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 3000));
+        serverCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
+      }
+
+      // Strategy 2: find frontend package and start dev server
+      if (!serverCheck.stdout.includes("LISTENING")) {
+        let serverDir = "/workspace";
+        const findFrontend = await sandbox.exec(
+          `find /workspace -maxdepth 3 -name 'vite.config.*' -o -name 'next.config.*' 2>/dev/null | grep -v node_modules | head -1 || true`,
+        );
+        if (findFrontend.success && findFrontend.stdout.trim()) {
+          serverDir = findFrontend.stdout.trim().replace(/\/[^/]+$/, "");
+        }
+        const pkgCheck = await sandbox.exec(`cat ${serverDir}/package.json 2>/dev/null || true`);
+        if (pkgCheck.stdout.includes("{")) {
+          const hasPnpm = await sandbox.exec(`ls /workspace/pnpm-lock.yaml 2>/dev/null && echo 'yes' || echo 'no'`);
+          const installCmd = hasPnpm.stdout.includes("yes")
+            ? `cd /workspace && pnpm install --no-frozen-lockfile 2>&1`
+            : `cd ${serverDir} && npm install --no-audit --no-fund 2>&1`;
+          await sandbox.exec(installCmd, { cwd: serverDir });
+          const startCmd = pkgCheck.stdout.includes('"dev"')
+            ? "npm run dev -- --port 8080 --host 0.0.0.0"
+            : pkgCheck.stdout.includes('"start"')
+              ? "PORT=8080 npm start"
+              : `npx -y serve ${serverDir} -l 8080`;
+          await sandbox.exec(
+            `bash -c 'cd ${serverDir} && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
+            { env: { PORT: "8080", HOME: "/root" } },
+          );
+          await new Promise((r) => setTimeout(r, 8000));
+        }
       }
     }
 

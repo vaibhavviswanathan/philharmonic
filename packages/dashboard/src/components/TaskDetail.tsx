@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTask, resolvePreviewUrl, subscribeToEvents, type Task, type PhilEvent, type ContextEntry } from "../api.js";
+import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTask, exposePort, subscribeToEvents, type Task, type PhilEvent, type ContextEntry } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { PlanReview } from "./PlanReview.js";
@@ -168,14 +168,23 @@ export function TaskDetail({
             </a>
           )}
           {task.previewUrl && !["cancelled", "closed", "failed"].includes(task.status) && (
-            <a
-              href={resolvePreviewUrl(task.previewUrl)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium"
+            <button
+              onClick={async () => {
+                try {
+                  // Always re-expose to get a fresh token (sandbox may have recycled)
+                  const freshUrl = await exposePort(task.id, 8080);
+                  window.open(freshUrl, "_blank");
+                  // Update task with new URL
+                  getTask(taskId).then(setTask);
+                } catch {
+                  // Fallback to stored URL if expose fails
+                  window.open(task.previewUrl!, "_blank");
+                }
+              }}
+              className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium cursor-pointer"
             >
               Live Preview
-            </a>
+            </button>
           )}
         </div>
         {task.status === "blocked" && task.blockedBy && (
