@@ -2,6 +2,7 @@
   "name": "philharmonic",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "AI Coding Agent Orchestration Engine",
   "license": "Apache-2.0",
   "scripts": {
@@ -10,7 +11,7 @@
     "dev:dashboard": "pnpm --filter @phil/dashboard dev",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
-    "test": "pnpm -r test"
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -21,5 +22,8 @@
       "workerd",
       "sharp"
     ]
+  },
+  "devDependencies": {
+    "vitest": "^4.1.2"
   }
 }
