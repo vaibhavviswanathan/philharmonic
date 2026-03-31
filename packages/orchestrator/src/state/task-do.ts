@@ -135,6 +135,7 @@ export class TaskCoordinator extends DurableObject<Env> {
   }
 
   private schemaReady = false;
+  private migrationsRun = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -167,6 +168,11 @@ export class TaskCoordinator extends DurableObject<Env> {
     if (!this.schemaReady) {
       this.ensureSchema();
       this.schemaReady = true;
+      this.migrationsRun = true;
+    } else if (!this.migrationsRun) {
+      // Schema exists but migrations may be pending (new columns added after deploy)
+      this.ensureSchema();
+      this.migrationsRun = true;
     }
   }
 
