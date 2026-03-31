@@ -229,33 +229,58 @@ export async function runAgentLoop(
     // If no server running, try to start one automatically
     if (!portCheck.stdout.includes("LISTENING")) {
       await onLog("No server on port 8080 — attempting to start one...");
-      // Check if package.json has a start/dev script
-      const pkgCheck = await sandbox.exec("cat /workspace/package.json 2>/dev/null || true");
-      if (pkgCheck.success && pkgCheck.stdout.includes("{")) {
-        // Ensure dependencies are installed
-        await onLog("Installing dependencies...");
-        const installResult = await sandbox.exec("cd /workspace && npm install --no-audit --no-fund 2>&1", { cwd: "/workspace" });
-        console.log(`[agent] npm install: success=${installResult.success} stdout=${installResult.stdout.slice(0, 200)}`);
 
-        // Try common dev server commands in order
-        const startCmd = pkgCheck.stdout.includes('"dev"')
-          ? "npm run dev -- --port 8080 --host 0.0.0.0"
-          : pkgCheck.stdout.includes('"start"')
-            ? "PORT=8080 npm start"
-            : "npx -y serve /workspace -l 8080";
-        await onLog(`Starting server: ${startCmd}`);
+      // Strategy 1: Look for a pre-built dist/ directory with index.html — serve statically (fast)
+      const findDist = await sandbox.exec(
+        `find /workspace -maxdepth 4 -path '*/dist/index.html' -not -path '*/node_modules/*' 2>/dev/null | head -1 || true`,
+      );
+      if (findDist.success && findDist.stdout.trim()) {
+        const distDir = findDist.stdout.trim().replace(/\/index\.html$/, "");
+        await onLog(`Found built assets at ${distDir} — serving statically`);
         await sandbox.exec(
-          `bash -c 'cd /workspace && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
-          { env: { PORT: "8080", HOME: "/root" } },
+          `bash -c 'npx -y serve ${distDir} -l 8080 > /tmp/dev-server.log 2>&1 &'`,
+          { env: { HOME: "/root" } },
         );
-        // Wait for server to start
-        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 3000));
         portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-        console.log(`[agent] Port check after start: ${portCheck.stdout}`);
-        if (!portCheck.stdout.includes("LISTENING")) {
-          const serverLog = await sandbox.exec("tail -20 /tmp/dev-server.log 2>/dev/null || true");
-          console.log(`[agent] Server log: ${serverLog.stdout.slice(0, 500)}`);
-          await onLog(`Server failed to start. Log: ${serverLog.stdout.slice(0, 300)}`);
+      }
+
+      // Strategy 2: Find a frontend package and start its dev server
+      if (!portCheck.stdout.includes("LISTENING")) {
+        let serverDir = "/workspace";
+        const findFrontend = await sandbox.exec(
+          `find /workspace -maxdepth 3 -name 'vite.config.*' -o -name 'next.config.*' 2>/dev/null | grep -v node_modules | head -1 || true`,
+        );
+        if (findFrontend.success && findFrontend.stdout.trim()) {
+          serverDir = findFrontend.stdout.trim().replace(/\/[^/]+$/, "");
+          console.log(`[agent] Found frontend package at: ${serverDir}`);
+        }
+
+        const pkgCheck = await sandbox.exec(`cat ${serverDir}/package.json 2>/dev/null || true`);
+        if (pkgCheck.success && pkgCheck.stdout.includes("{")) {
+          await onLog(`Installing dependencies in ${serverDir}...`);
+          const hasPnpm = await sandbox.exec(`ls /workspace/pnpm-lock.yaml 2>/dev/null && echo 'yes' || echo 'no'`);
+          const installCmd = hasPnpm.stdout.includes("yes")
+            ? `cd /workspace && pnpm install --no-frozen-lockfile 2>&1`
+            : `cd ${serverDir} && npm install --no-audit --no-fund 2>&1`;
+          await sandbox.exec(installCmd, { cwd: serverDir });
+
+          const startCmd = pkgCheck.stdout.includes('"dev"')
+            ? "npm run dev -- --port 8080 --host 0.0.0.0"
+            : pkgCheck.stdout.includes('"start"')
+              ? "PORT=8080 npm start"
+              : `npx -y serve ${serverDir} -l 8080`;
+          await onLog(`Starting server in ${serverDir}: ${startCmd}`);
+          await sandbox.exec(
+            `bash -c 'cd ${serverDir} && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
+            { env: { PORT: "8080", HOME: "/root" } },
+          );
+          await new Promise((r) => setTimeout(r, 8000));
+          portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
+          if (!portCheck.stdout.includes("LISTENING")) {
+            const serverLog = await sandbox.exec("tail -20 /tmp/dev-server.log 2>/dev/null || true");
+            await onLog(`Server failed to start. Log: ${serverLog.stdout.slice(0, 300)}`);
+          }
         }
       }
     }

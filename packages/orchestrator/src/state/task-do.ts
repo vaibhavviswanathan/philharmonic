@@ -1003,24 +1003,52 @@ export class TaskCoordinator extends DurableObject<Env> {
         // If no server running, try to start one automatically
         if (!portCheck.stdout.includes("LISTENING")) {
           await this.appendLog(taskId, "", "No server on port 8080 — attempting to start one...", "info");
-          const pkgCheck = await sandbox.exec("cat /workspace/package.json 2>/dev/null || true");
-          if (pkgCheck.success && pkgCheck.stdout.includes("{")) {
-            // Ensure dependencies are installed
-            await this.appendLog(taskId, "", "Installing dependencies...", "info");
-            await sandbox.exec("cd /workspace && npm install --no-audit --no-fund 2>&1", { cwd: "/workspace" });
 
-            const startCmd = pkgCheck.stdout.includes('"dev"')
-              ? "npm run dev -- --port 8080 --host 0.0.0.0"
-              : pkgCheck.stdout.includes('"start"')
-                ? "PORT=8080 npm start"
-                : "npx -y serve /workspace -l 8080";
-            await this.appendLog(taskId, "", `Starting server: ${startCmd}`, "info");
+          // Strategy 1: serve pre-built dist/ if available
+          const findDist = await sandbox.exec(
+            `find /workspace -maxdepth 4 -path '*/dist/index.html' -not -path '*/node_modules/*' 2>/dev/null | head -1 || true`,
+          );
+          if (findDist.success && findDist.stdout.trim()) {
+            const distDir = findDist.stdout.trim().replace(/\/index\.html$/, "");
+            await this.appendLog(taskId, "", `Serving built assets from ${distDir}`, "info");
             await sandbox.exec(
-              `bash -c 'cd /workspace && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
-              { env: { PORT: "8080", HOME: "/root" } },
+              `bash -c 'npx -y serve ${distDir} -l 8080 > /tmp/dev-server.log 2>&1 &'`,
+              { env: { HOME: "/root" } },
             );
-            await new Promise((r) => setTimeout(r, 5000));
+            await new Promise((r) => setTimeout(r, 3000));
             portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
+          }
+
+          // Strategy 2: find frontend package and start dev server
+          if (!portCheck.stdout.includes("LISTENING")) {
+            let serverDir = "/workspace";
+            const findFrontend = await sandbox.exec(
+              `find /workspace -maxdepth 3 -name 'vite.config.*' -o -name 'next.config.*' 2>/dev/null | grep -v node_modules | head -1 || true`,
+            );
+            if (findFrontend.success && findFrontend.stdout.trim()) {
+              serverDir = findFrontend.stdout.trim().replace(/\/[^/]+$/, "");
+            }
+            const pkgCheck = await sandbox.exec(`cat ${serverDir}/package.json 2>/dev/null || true`);
+            if (pkgCheck.success && pkgCheck.stdout.includes("{")) {
+              await this.appendLog(taskId, "", `Installing deps in ${serverDir}...`, "info");
+              const hasPnpm = await sandbox.exec(`ls /workspace/pnpm-lock.yaml 2>/dev/null && echo 'yes' || echo 'no'`);
+              const installCmd = hasPnpm.stdout.includes("yes")
+                ? `cd /workspace && pnpm install --no-frozen-lockfile 2>&1`
+                : `cd ${serverDir} && npm install --no-audit --no-fund 2>&1`;
+              await sandbox.exec(installCmd, { cwd: serverDir });
+              const startCmd = pkgCheck.stdout.includes('"dev"')
+                ? "npm run dev -- --port 8080 --host 0.0.0.0"
+                : pkgCheck.stdout.includes('"start"')
+                  ? "PORT=8080 npm start"
+                  : `npx -y serve ${serverDir} -l 8080`;
+              await this.appendLog(taskId, "", `Starting server in ${serverDir}: ${startCmd}`, "info");
+              await sandbox.exec(
+                `bash -c 'cd ${serverDir} && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
+                { env: { PORT: "8080", HOME: "/root" } },
+              );
+              await new Promise((r) => setTimeout(r, 8000));
+              portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
+            }
           }
         }
 
