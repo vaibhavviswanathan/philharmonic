@@ -2,14 +2,18 @@ import { useMemo } from "react";
 import type { Task } from "../api.js";
 
 const STATUS_COLORS: Record<string, { fill: string; stroke: string }> = {
+  backlog: { fill: "#1F2937", stroke: "#374151" },
   queued: { fill: "#374151", stroke: "#4B5563" },
   planning: { fill: "#1E3A5F", stroke: "#2563EB" },
   planned: { fill: "#312E81", stroke: "#6366F1" },
   blocked: { fill: "#7C2D12", stroke: "#EA580C" },
   running: { fill: "#713F12", stroke: "#CA8A04" },
+  reviewing: { fill: "#4A1D6A", stroke: "#A855F7" },
+  fixing: { fill: "#4A1D6A", stroke: "#C084FC" },
   success: { fill: "#14532D", stroke: "#16A34A" },
   failed: { fill: "#7F1D1D", stroke: "#DC2626" },
   cancelled: { fill: "#374151", stroke: "#6B7280" },
+  closed: { fill: "#374151", stroke: "#6B7280" },
 };
 
 interface Node {
@@ -72,29 +76,63 @@ export function DependencyGraph({
 
           const NODE_W = 220;
           const NODE_H = 72;
-          // Draw from bottom of "from" to top of "to"
-          const x1 = from.x + NODE_W / 2;
-          const y1 = from.y + NODE_H;
-          const x2 = to.x + NODE_W / 2;
-          const y2 = to.y;
-          const midY = (y1 + y2) / 2;
+
+          // Smart edge routing: pick the closest sides
+          const fromCx = from.x + NODE_W / 2;
+          const fromCy = from.y + NODE_H / 2;
+          const toCx = to.x + NODE_W / 2;
+          const toCy = to.y + NODE_H / 2;
+
+          const dx = toCx - fromCx;
+          const dy = toCy - fromCy;
+
+          let x1: number, y1: number, x2: number, y2: number;
+          let path: string;
+
+          if (Math.abs(dy) >= Math.abs(dx)) {
+            // Primarily vertical: connect bottom→top
+            if (dy >= 0) {
+              x1 = fromCx; y1 = from.y + NODE_H;
+              x2 = toCx;   y2 = to.y;
+            } else {
+              x1 = fromCx; y1 = from.y;
+              x2 = toCx;   y2 = to.y + NODE_H;
+            }
+            const midY = (y1 + y2) / 2;
+            path = `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
+          } else {
+            // Primarily horizontal: connect right→left
+            if (dx >= 0) {
+              x1 = from.x + NODE_W; y1 = fromCy;
+              x2 = to.x;            y2 = toCy;
+            } else {
+              x1 = from.x;          y1 = fromCy;
+              x2 = to.x + NODE_W;   y2 = toCy;
+            }
+            const midX = (x1 + x2) / 2;
+            path = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
+          }
+
+          const isConflict = edge.label === "blocks";
+          const color = isConflict ? "#EA580C" : "#6366F1";
 
           return (
             <g key={i}>
               <path
-                d={`M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`}
+                d={path}
                 fill="none"
-                stroke="#4B5563"
+                stroke={color}
                 strokeWidth="2"
-                strokeDasharray={edge.from === "conflict" ? "4 4" : "none"}
+                strokeDasharray={isConflict ? "6 3" : "none"}
                 markerEnd="url(#arrowhead)"
+                opacity={0.8}
               />
               {edge.label && (
                 <text
                   x={(x1 + x2) / 2}
-                  y={midY - 4}
+                  y={Math.min(y1, y2) - 6}
                   textAnchor="middle"
-                  fill="#9CA3AF"
+                  fill={color}
                   fontSize="10"
                 >
                   {edge.label}
@@ -172,50 +210,11 @@ export function DependencyGraph({
           );
         })}
 
-        {/* Touch-set conflict edges (orange dashed) */}
-        {tasks
-          .filter((t) => t.blockedBy)
-          .map((t) => {
-            const blocked = nodes.find((n) => n.id === t.id);
-            const blocker = nodes.find((n) => n.id === t.blockedBy);
-            if (!blocked || !blocker) return null;
-
-            const NODE_W = 220;
-            const NODE_H = 72;
-            const x1 = blocker.x + NODE_W;
-            const y1 = blocker.y + NODE_H / 2;
-            const x2 = blocked.x;
-            const y2 = blocked.y + NODE_H / 2;
-            const midX = (x1 + x2) / 2;
-
-            return (
-              <g key={`conflict-${t.id}`}>
-                <path
-                  d={`M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`}
-                  fill="none"
-                  stroke="#EA580C"
-                  strokeWidth="2"
-                  strokeDasharray="6 3"
-                  markerEnd="url(#arrowhead)"
-                  opacity={0.7}
-                />
-                <text
-                  x={midX}
-                  y={Math.min(y1, y2) - 6}
-                  textAnchor="middle"
-                  fill="#EA580C"
-                  fontSize="10"
-                  fontWeight="500"
-                >
-                  conflict
-                </text>
-              </g>
-            );
-          })}
+        {/* Conflict edges are now rendered in the unified edges loop above */}
       </svg>
 
       <div className="flex items-center gap-4 mt-3 justify-center">
-        <Legend color="#4B5563" label="Dependency" dashed={false} />
+        <Legend color="#6366F1" label="Dependency" dashed={false} />
         <Legend color="#EA580C" label="Conflict" dashed={true} />
         {Object.entries(STATUS_COLORS).map(([status, colors]) => (
           <div key={status} className="flex items-center gap-1">
@@ -259,9 +258,9 @@ function Legend({
 }
 
 /**
- * Simple layered graph layout.
- * Groups tasks by status into layers, positions them vertically.
- * Tasks with blockedBy relationships get edges.
+ * Dependency-aware layered graph layout.
+ * Uses topological depth for row placement (dependencies flow top→bottom).
+ * Tasks at the same depth are spread horizontally.
  */
 function layoutGraph(tasks: Task[]): {
   nodes: Node[];
@@ -272,78 +271,116 @@ function layoutGraph(tasks: Task[]): {
   const NODE_W = 220;
   const NODE_H = 72;
   const GAP_X = 40;
-  const GAP_Y = 40;
+  const GAP_Y = 50;
   const PADDING = 30;
 
-  // Assign layers based on status progression
-  const statusOrder = [
-    "queued",
-    "planning",
-    "planned",
-    "blocked",
-    "running",
-    "success",
-    "failed",
-    "cancelled",
-  ];
-
-  // Group tasks by their status layer
-  const layers = new Map<number, Task[]>();
-  for (const task of tasks) {
-    const layer = statusOrder.indexOf(task.status);
-    const idx = layer >= 0 ? layer : 0;
-    const list = layers.get(idx) ?? [];
-    list.push(task);
-    layers.set(idx, list);
-  }
-
-  // Build subtask dependency edges within a task
+  // Build edges
   const edges: Edge[] = [];
+  const taskMap = new Map(tasks.map((t) => [t.id, t]));
 
-  // Build explicit dependency edges
+  // Explicit dependency edges
   for (const task of tasks) {
     if (task.dependsOn) {
       for (const depId of task.dependsOn) {
-        if (tasks.find((t) => t.id === depId)) {
+        if (taskMap.has(depId)) {
           edges.push({ from: depId, to: task.id, label: "depends" });
         }
       }
     }
   }
 
-  // Build blockedBy edges (touch-set conflicts)
+  // blockedBy edges (touch-set conflicts)
   for (const task of tasks) {
-    if (task.blockedBy && tasks.find((t) => t.id === task.blockedBy)) {
+    if (task.blockedBy && taskMap.has(task.blockedBy)) {
       edges.push({ from: task.blockedBy, to: task.id, label: "blocks" });
     }
   }
 
-  // Position nodes: arrange by creation time within each column
-  // Use a simple grid: one column per unique status that has tasks
-  const activeLayers = [...layers.entries()]
-    .filter(([, list]) => list.length > 0)
-    .sort(([a], [b]) => a - b);
+  // Compute topological depth — tasks with no deps/blockers are row 0
+  const depth = new Map<string, number>();
+  function getDepth(id: string, visited: Set<string>): number {
+    if (depth.has(id)) return depth.get(id)!;
+    if (visited.has(id)) return 0; // cycle guard
+    visited.add(id);
 
-  const nodes: Node[] = [];
-  let maxCol = 0;
-  let maxRow = 0;
+    const task = taskMap.get(id);
+    if (!task) return 0;
 
-  for (let col = 0; col < activeLayers.length; col++) {
-    const [, list] = activeLayers[col];
-    for (let row = 0; row < list.length; row++) {
-      nodes.push({
-        id: list[row].id,
-        task: list[row],
-        x: PADDING + col * (NODE_W + GAP_X),
-        y: PADDING + row * (NODE_H + GAP_Y),
-      });
-      maxRow = Math.max(maxRow, row);
+    let maxParent = -1;
+    // dependsOn parents
+    for (const depId of task.dependsOn ?? []) {
+      if (taskMap.has(depId)) {
+        maxParent = Math.max(maxParent, getDepth(depId, visited));
+      }
     }
-    maxCol = col;
+    // blockedBy parent
+    if (task.blockedBy && taskMap.has(task.blockedBy)) {
+      maxParent = Math.max(maxParent, getDepth(task.blockedBy, visited));
+    }
+
+    const d = maxParent + 1;
+    depth.set(id, d);
+    return d;
   }
 
-  const width = PADDING * 2 + (maxCol + 1) * (NODE_W + GAP_X);
-  const height = PADDING * 2 + (maxRow + 1) * (NODE_H + GAP_Y);
+  for (const task of tasks) {
+    getDepth(task.id, new Set());
+  }
 
-  return { nodes, edges, width: Math.max(width, 300), height: Math.max(height, 200) };
+  // Group tasks by depth row
+  const rows = new Map<number, Task[]>();
+  for (const task of tasks) {
+    const d = depth.get(task.id) ?? 0;
+    const list = rows.get(d) ?? [];
+    list.push(task);
+    rows.set(d, list);
+  }
+
+  // Sort rows, position nodes
+  const sortedRows = [...rows.entries()].sort(([a], [b]) => a - b);
+  const nodes: Node[] = [];
+  let maxCol = 0;
+
+  for (const [, list] of sortedRows) {
+    // Sort within row by status, then creation time for stability
+    const statusOrder: Record<string, number> = {
+      backlog: 0, queued: 1, planning: 2, planned: 3, blocked: 4,
+      running: 5, reviewing: 6, fixing: 7, success: 8, failed: 9,
+      cancelled: 10, closed: 11,
+    };
+    list.sort((a, b) => (statusOrder[a.status] ?? 0) - (statusOrder[b.status] ?? 0));
+  }
+
+  for (let row = 0; row < sortedRows.length; row++) {
+    const [, list] = sortedRows[row];
+    // Center the row
+    const rowWidth = list.length * (NODE_W + GAP_X) - GAP_X;
+    const totalWidth = Math.max(tasks.length, list.length) * (NODE_W + GAP_X);
+    const offsetX = (totalWidth - rowWidth) / 2;
+
+    for (let col = 0; col < list.length; col++) {
+      nodes.push({
+        id: list[col].id,
+        task: list[col],
+        x: PADDING + offsetX + col * (NODE_W + GAP_X),
+        y: PADDING + row * (NODE_H + GAP_Y),
+      });
+      maxCol = Math.max(maxCol, col);
+    }
+  }
+
+  // Compute bounding box
+  let maxX = 0;
+  let maxY = 0;
+  for (const n of nodes) {
+    maxX = Math.max(maxX, n.x + NODE_W);
+    maxY = Math.max(maxY, n.y + NODE_H);
+  }
+
+  return {
+    nodes,
+    edges,
+    width: Math.max(maxX + PADDING, 300),
+    height: Math.max(maxY + PADDING, 200),
+  };
 }
