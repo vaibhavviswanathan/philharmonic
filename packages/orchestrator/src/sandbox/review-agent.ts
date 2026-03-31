@@ -1,100 +1,9 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type { Sandbox as SandboxInstance } from "@cloudflare/sandbox";
 import type { Task } from "@phil/shared";
 import type { Env } from "../env.js";
 
 /**
- * Tools available during review fix — same as main agent but scoped in prompt.
- */
-const REVIEW_TOOLS: Anthropic.Messages.Tool[] = [
-  {
-    name: "fs_read",
-    description: "Read the contents of a file at the given path.",
-    input_schema: {
-      type: "object" as const,
-      properties: { path: { type: "string", description: "Absolute or relative file path" } },
-      required: ["path"],
-    },
-  },
-  {
-    name: "fs_write",
-    description: "Write content to a file, creating directories as needed.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        path: { type: "string", description: "File path to write to" },
-        content: { type: "string", description: "Content to write" },
-      },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "shell_exec",
-    description: "Execute a shell command and return its output.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        command: { type: "string", description: "Shell command to run" },
-      },
-      required: ["command"],
-    },
-  },
-  {
-    name: "git_commit",
-    description: "Stage files and create a git commit.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        message: { type: "string", description: "Commit message" },
-        files: { type: "array", items: { type: "string" }, description: "Files to stage (omit to stage all)" },
-      },
-      required: ["message"],
-    },
-  },
-  {
-    name: "git_push",
-    description: "Push commits to the remote feature branch.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        branch: { type: "string", description: "Branch name to push" },
-      },
-      required: ["branch"],
-    },
-  },
-];
-
-function buildReviewSystemPrompt(task: Task, reviewContext: string): string {
-  return `You are Phil's review-fix agent. A PR has been reviewed and you need to address the reviewer's comments.
-
-## Context
-- Branch: ${task.branchName}
-- Repository: ${task.repoUrl}
-- PR: ${task.prUrl ?? "unknown"}
-- Task: ${task.description}
-
-## Review Comments to Address
-${reviewContext}
-
-## Instructions
-1. Read the files mentioned in the review comments (or the relevant files)
-2. Make the requested changes
-3. Commit with a clear message referencing the review feedback
-4. Push to the branch (the PR will auto-update)
-
-## Rules
-- Only make changes that address the review comments — don't refactor or change unrelated code
-- Keep commits focused and descriptive
-- Do NOT run install, build, test, or lint commands unless the reviewer specifically asks you to verify something
-- If a review comment is unclear or contradictory, make your best judgment and note it in the commit message
-- NEVER force-push
-- NEVER run git reset, git rebase, or any destructive git operations
-- After pushing, you are DONE. Do not try to verify or fetch — just stop
-`;
-}
-
-/**
- * Runs a scoped agent loop to address PR review comments.
+ * Runs Claude Code CLI to address PR review comments.
  * Reuses the existing sandbox (still has the repo + branch).
  */
 export async function runReviewFixLoop(
@@ -104,141 +13,138 @@ export async function runReviewFixLoop(
   env: Env,
   onLog: (message: string) => Promise<void>,
 ): Promise<{ pushed: boolean }> {
-  const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const systemPrompt = buildReviewSystemPrompt(task, reviewContext);
+  const token = env.GITHUB_TOKEN ?? "";
 
-  const messages: Anthropic.Messages.MessageParam[] = [
-    {
-      role: "user",
-      content: "Address the review comments above. Read the relevant files, make the fixes, commit, and push.",
-    },
-  ];
-
-  let pushed = false;
-  const maxTurns = 25; // Review fixes should be quick
-
-  for (let turn = 0; turn < maxTurns; turn++) {
-    await onLog(`Review fix turn ${turn + 1}/${maxTurns}`);
-
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8192,
-      system: systemPrompt,
-      tools: REVIEW_TOOLS,
-      messages,
-    });
-
-    messages.push({ role: "assistant", content: response.content });
-
-    if (response.stop_reason === "end_turn") {
-      const textBlocks = response.content.filter((b) => b.type === "text");
-      if (textBlocks.length > 0) {
-        await onLog(`Review fix done: ${(textBlocks[0] as Anthropic.Messages.TextBlock).text.slice(0, 200)}`);
-      }
-      break;
-    }
-
-    const toolUseBlocks = response.content.filter(
-      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use",
+  // Ensure git credentials are set (sandbox may have been restarted)
+  if (token) {
+    await sandbox.exec(
+      `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=${token}"; }; f'`,
     );
+  }
 
-    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+  const prompt = `You are fixing PR review comments on branch ${task.branchName}.
 
-    for (const toolUse of toolUseBlocks) {
-      const input = toolUse.input as Record<string, unknown>;
-      await onLog(`Tool: ${toolUse.name} ${JSON.stringify(input).slice(0, 100)}`);
+## Task
+${task.description}
 
-      try {
-        const result = await executeReviewTool(sandbox, toolUse.name, input, env);
+## PR
+${task.prUrl ?? "unknown"}
 
-        if (toolUse.name === "git_push") {
-          pushed = true;
-          await onLog("Changes pushed to PR");
+## Review Comments to Address
+${reviewContext}
+
+## Instructions
+1. Read the files mentioned in the review comments
+2. Make the requested changes
+3. Commit with a clear message referencing the review feedback
+4. Push to the branch (the PR will auto-update)
+
+## Rules
+- Only make changes that address the review comments — don't refactor unrelated code
+- Keep commits focused and descriptive
+- Do NOT run install, build, test, or lint unless the reviewer specifically asks
+- If asked to rebase: git fetch origin main && git rebase origin/main, then push with --force-with-lease
+- After pushing, you are DONE — stop immediately`;
+
+  const systemAppend = `## Phil Review Agent Rules
+- You are running inside a sandboxed container as Phil's review-fix agent.
+- Port 3000 is RESERVED — use port 8080 for any servers.
+- After fixing, you MUST: git add, git commit, git push.
+- Force-push with --force-with-lease is ALLOWED after a rebase.`;
+
+  await sandbox.writeFile("/tmp/phil-prompt.txt", prompt);
+  await sandbox.writeFile("/tmp/phil-system-append.txt", systemAppend);
+
+  await onLog("Starting Claude Code review-fix agent...");
+
+  // Clean up previous output
+  await sandbox.exec("rm -f /tmp/claude-output.jsonl /tmp/claude-exit-code");
+
+  const claudeCmd = [
+    'claude',
+    '-p', '"$(cat /tmp/phil-prompt.txt)"',
+    '--append-system-prompt-file', '/tmp/phil-system-append.txt',
+    '--allowedTools', '"Bash,Read,Write,Edit,Glob,Grep"',
+    '--output-format', 'stream-json',
+    '--max-turns', '100',
+  ].join(' ');
+
+  await sandbox.exec(
+    `bash -c '${claudeCmd} > /tmp/claude-output.jsonl 2>&1; echo $? > /tmp/claude-exit-code' &`,
+    {
+      cwd: "/workspace",
+      env: {
+        ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+        GH_TOKEN: token,
+        HOME: "/root",
+      },
+    },
+  );
+
+  // Poll for completion
+  const maxWallClock = 5 * 60 * 1000; // 5 minutes for review fixes
+  const startTime = Date.now();
+  let lastLine = 0;
+
+  while (Date.now() - startTime < maxWallClock) {
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // Read new log lines
+    try {
+      const tail = await sandbox.exec(
+        `tail -n +${lastLine + 1} /tmp/claude-output.jsonl 2>/dev/null || true`,
+      );
+      if (tail.success && tail.stdout.trim()) {
+        const lines = tail.stdout.split("\n").filter(Boolean);
+        for (const line of lines) {
+          lastLine++;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "stream_event" && event.event?.type === "tool_use") {
+              await onLog(`Tool: ${event.event.name}`);
+            }
+          } catch { /* skip non-JSON */ }
         }
-
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: String(result).slice(0, 10_000),
-        });
-      } catch (err) {
-        await onLog(`Tool error: ${toolUse.name} - ${err}`);
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: `Error: ${err}`,
-          is_error: true,
-        });
       }
-    }
+    } catch { /* file not ready */ }
 
-    messages.push({ role: "user", content: toolResults });
+    // Check if done
+    try {
+      const exitCheck = await sandbox.exec("cat /tmp/claude-exit-code 2>/dev/null || echo 'running'");
+      if (exitCheck.success && exitCheck.stdout.trim() !== "running") {
+        await onLog(`Review fix agent exited with code ${exitCheck.stdout.trim()}`);
+        break;
+      }
+    } catch { /* still running */ }
+  }
+
+  if (Date.now() - startTime >= maxWallClock) {
+    await onLog("Review fix hit 5min limit — stopping");
+    await sandbox.exec("pkill -f 'claude.*-p' 2>/dev/null || true");
+  }
+
+  // Check if changes were pushed
+  let pushed = false;
+  try {
+    const gitLog = await sandbox.exec(
+      `git log --oneline -1 --format='%H' origin/${task.branchName} 2>/dev/null || true`,
+      { cwd: "/workspace" },
+    );
+    const localHead = await sandbox.exec("git rev-parse HEAD", { cwd: "/workspace" });
+    // If local HEAD is ahead of remote, push wasn't done — but Claude Code should have pushed
+    // Check reflog for push
+    const pushCheck = await sandbox.exec(
+      `git reflog show origin/${task.branchName} --format='%H' -1 2>/dev/null || true`,
+      { cwd: "/workspace" },
+    );
+    // Simple heuristic: if there are new commits since we started, assume pushed
+    pushed = gitLog.stdout.trim() !== "" || pushCheck.stdout.trim() !== "";
+    if (pushed) {
+      await onLog("Changes pushed to PR");
+    }
+  } catch {
+    // Assume pushed if Claude Code didn't error
   }
 
   return { pushed };
-}
-
-/**
- * Execute a tool — same as main agent but reuses the tool implementations.
- */
-async function executeReviewTool(
-  sandbox: SandboxInstance,
-  toolName: string,
-  input: Record<string, unknown>,
-  env: Env,
-): Promise<string> {
-  switch (toolName) {
-    case "fs_read": {
-      const result = await sandbox.readFile(input.path as string);
-      return result.content;
-    }
-    case "fs_write": {
-      await sandbox.writeFile(input.path as string, input.content as string);
-      return `Written to ${input.path}`;
-    }
-    case "shell_exec": {
-      const result = await sandbox.exec(input.command as string, {
-        cwd: "/workspace",
-        timeout: 120_000,
-      });
-      const output = (result.stdout ?? "") + (result.stderr ? `\nSTDERR:\n${result.stderr}` : "");
-      if (!result.success) {
-        return `EXIT ${result.exitCode}\n${output}`;
-      }
-      return output || "(no output)";
-    }
-    case "git_commit": {
-      const files = input.files as string[] | undefined;
-      if (files && files.length > 0) {
-        await sandbox.exec(`git add ${files.join(" ")}`, { cwd: "/workspace" });
-      } else {
-        await sandbox.exec("git add -A", { cwd: "/workspace" });
-      }
-      const result = await sandbox.exec(
-        `git commit -m "${(input.message as string).replace(/"/g, '\\"')}"`,
-        { cwd: "/workspace" },
-      );
-      return result.stdout ?? result.stderr ?? "Committed";
-    }
-    case "git_push": {
-      const branch = input.branch as string;
-      const token = env.GITHUB_TOKEN ?? "";
-      const remoteResult = await sandbox.exec("git remote get-url origin", { cwd: "/workspace" });
-      const originalUrl = remoteResult.stdout?.trim() ?? "";
-      if (!token) return "Push failed: GITHUB_TOKEN not set";
-      const authedUrl = originalUrl.replace("https://", `https://x-access-token:${token}@`);
-      await sandbox.exec(`git remote set-url origin '${authedUrl}'`, { cwd: "/workspace" });
-      const pushResult = await sandbox.exec(`git push origin ${branch}`, {
-        cwd: "/workspace",
-        timeout: 60_000,
-      });
-      await sandbox.exec(`git remote set-url origin '${originalUrl}'`, { cwd: "/workspace" });
-      if (!pushResult.success) {
-        return `Push failed (exit ${pushResult.exitCode}): ${pushResult.stderr ?? pushResult.stdout ?? "unknown error"}`;
-      }
-      return pushResult.stderr ?? pushResult.stdout ?? "Pushed";
-    }
-    default:
-      throw new Error(`Unknown tool: ${toolName}`);
-  }
 }

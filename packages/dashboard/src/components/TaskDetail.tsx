@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from "react";
-import { getTask, resolveTask, subscribeToEvents, type Task, type PhilEvent } from "../api.js";
+import { getTask, getLogs, mergeTask, closeTask, cancelTask, startTask, resolvePreviewUrl, subscribeToEvents, type Task, type PhilEvent } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChatPanel } from "./ChatPanel.js";
+import { PlanReview } from "./PlanReview.js";
 
 export function TaskDetail({
   taskId,
@@ -16,6 +17,9 @@ export function TaskDetail({
 
   useEffect(() => {
     getTask(taskId).then(setTask);
+    getLogs(taskId).then((entries) => {
+      setLogs(entries.map((e) => e.message));
+    });
     const interval = setInterval(() => {
       getTask(taskId).then(setTask);
     }, 3000);
@@ -102,34 +106,78 @@ export function TaskDetail({
               </span>
             ) : null}
           </div>
-          {isReviewPhase && (
-            <button
-              onClick={() => {
-                if (confirm("Mark this task as resolved? This will destroy the sandbox.")) {
-                  resolveTask(task.id).then(() => getTask(taskId).then(setTask));
-                }
-              }}
-              className="px-3 py-1 bg-green-700 hover:bg-green-600 rounded text-xs font-medium"
-            >
-              Resolve & Close
-            </button>
-          )}
+          <div className="flex gap-2">
+            {isReviewPhase && task.prUrl && (
+              <button
+                onClick={() => {
+                  if (confirm("Merge this PR and close the task?")) {
+                    mergeTask(task.id)
+                      .then(() => getTask(taskId).then(setTask))
+                      .catch((err) => alert(`Merge failed: ${err.message}`));
+                  }
+                }}
+                className="px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-xs font-medium"
+              >
+                Approve & Merge
+              </button>
+            )}
+            {isReviewPhase && (
+              <button
+                onClick={() => {
+                  if (confirm("Close this task and its PR? This cannot be undone.")) {
+                    closeTask(task.id)
+                      .then(() => getTask(taskId).then(setTask))
+                      .catch((err) => alert(`Close failed: ${err.message}`));
+                  }
+                }}
+                className="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs font-medium"
+              >
+                Close
+              </button>
+            )}
+            {(task.status === "planning" || task.status === "planned" || task.status === "queued" || task.status === "running" || task.status === "blocked") && (
+              <button
+                onClick={() => {
+                  if (confirm("Cancel this task?")) {
+                    cancelTask(task.id)
+                      .then(() => getTask(taskId).then(setTask))
+                      .catch((err) => alert(`Cancel failed: ${err.message}`));
+                  }
+                }}
+                className="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs font-medium"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
         </div>
         <p className="font-medium mb-1">{task.description}</p>
         <p className="text-sm text-gray-400">{task.repoUrl}</p>
         {task.branchName && (
           <p className="text-xs text-gray-500 mt-1 font-mono">{task.branchName}</p>
         )}
-        {task.prUrl && (
-          <a
-            href={task.prUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-2 inline-block text-sm text-blue-400 hover:underline"
-          >
-            View Pull Request
-          </a>
-        )}
+        <div className="flex items-center gap-3 mt-2">
+          {task.prUrl && (
+            <a
+              href={task.prUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-blue-400 hover:underline"
+            >
+              View Pull Request
+            </a>
+          )}
+          {task.previewUrl && !["cancelled", "closed", "failed"].includes(task.status) && (
+            <a
+              href={resolvePreviewUrl(task.previewUrl)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium"
+            >
+              Live Preview
+            </a>
+          )}
+        </div>
         {task.status === "blocked" && task.blockedBy && (
           <p className="mt-2 text-sm text-orange-400">
             Blocked by task <span className="font-mono">{task.blockedBy}</span> (touch-set conflict)
@@ -140,12 +188,33 @@ export function TaskDetail({
             Sandbox is alive — add PR review comments or send messages below. The agent will automatically fix them.
           </p>
         )}
+        {task.status === "backlog" && (
+          <div className="mt-3">
+            <button
+              onClick={() => {
+                startTask(task.id)
+                  .then(() => getTask(taskId).then(setTask))
+                  .catch((err) => alert(`Start failed: ${(err as Error).message}`));
+              }}
+              className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium"
+            >
+              Start Planning
+            </button>
+            <p className="mt-1 text-xs text-gray-500">Move this task out of backlog and begin planning.</p>
+          </div>
+        )}
         {task.error && (
           <p className="mt-2 text-sm text-red-400">{task.error}</p>
         )}
       </div>
 
-      {task.subtasks.length > 0 && (
+      {/* Plan review — show when task is planned or being revised */}
+      {(task.status === "planned" || (task.status === "planning" && task.planMarkdown)) && (
+        <PlanReview task={task} onUpdate={() => getTask(taskId).then(setTask)} />
+      )}
+
+      {/* Subtasks — show during execution (running, reviewing, etc.) */}
+      {task.subtasks.length > 0 && task.status !== "planned" && task.status !== "planning" && (
         <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
           <h3 className="text-sm font-semibold mb-2">Subtasks</h3>
           <div className="space-y-2">
@@ -198,3 +267,4 @@ export function TaskDetail({
     </div>
   );
 }
+

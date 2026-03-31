@@ -9,11 +9,19 @@ export const CreateProjectSchema = z.object({
 
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 
+export const UpdateProjectSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  autonomyLevel: z.enum(["supervised", "moderate", "high", "full"]).optional(),
+});
+
+export type UpdateProjectInput = z.infer<typeof UpdateProjectSchema>;
+
 // --- Tasks ---
 
 export const CreateTaskSchema = z.object({
   projectId: z.string().min(1),
   description: z.string().min(1).max(2000),
+  backlog: z.boolean().optional(),
 });
 
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;

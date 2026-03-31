@@ -39,6 +39,7 @@ export { defaultAllowedTools } from "./tools/definitions.js";
 
 export {
   CreateProjectSchema,
+  UpdateProjectSchema,
   CreateTaskSchema,
   TaskIdParamSchema,
   UpdateSettingsSchema,
@@ -48,6 +49,7 @@ export {
 
 export type {
   CreateProjectInput,
+  UpdateProjectInput,
   CreateTaskInput,
   UpdateSettingsInput,
   SandboxStatusUpdate,

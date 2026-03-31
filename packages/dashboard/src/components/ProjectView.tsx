@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { listTasks, createTask, type Project, type Task } from "../api.js";
+import { listTasks, createTask, updateProject, type Project, type Task, type AutonomyLevel } from "../api.js";
 import { TaskCard } from "./TaskCard.js";
 import { TaskDetail } from "./TaskDetail.js";
 import { KanbanBoard } from "./KanbanBoard.js";
@@ -8,16 +8,18 @@ import { DependencyGraph } from "./DependencyGraph.js";
 type ViewMode = "list" | "kanban" | "graph";
 
 export function ProjectView({
-  project,
+  project: initialProject,
   onBack,
 }: {
   project: Project;
   onBack: () => void;
 }) {
+  const [project, setProject] = useState(initialProject);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [backlog, setBacklog] = useState(false);
   const [error, setError] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
 
@@ -36,8 +38,9 @@ export function ProjectView({
     setSubmitting(true);
     setError("");
     try {
-      await createTask(project.id, description);
+      await createTask(project.id, description, backlog);
       setDescription("");
+      setBacklog(false);
       refresh();
     } catch (err) {
       setError(String(err));
@@ -62,8 +65,33 @@ export function ProjectView({
       </button>
 
       <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-        <h2 className="text-lg font-semibold">{project.name}</h2>
-        <p className="text-sm text-gray-400 mt-1">{project.repoUrl}</p>
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">{project.name}</h2>
+            <p className="text-sm text-gray-400 mt-1">{project.repoUrl}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-400">Autonomy:</label>
+            <select
+              value={project.autonomyLevel ?? "supervised"}
+              onChange={async (e) => {
+                const level = e.target.value as AutonomyLevel;
+                try {
+                  const updated = await updateProject(project.id, { autonomyLevel: level });
+                  setProject(updated);
+                } catch (err) {
+                  console.error("Failed to update autonomy:", err);
+                }
+              }}
+              className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white focus:outline-none focus:border-blue-500"
+            >
+              <option value="supervised">Supervised</option>
+              <option value="moderate">Moderate (&le;3 files)</option>
+              <option value="high">High (&le;10 files)</option>
+              <option value="full">Full auto</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-3 p-4 bg-gray-900 rounded-lg border border-gray-800">
@@ -77,13 +105,24 @@ export function ProjectView({
           className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
         />
         {error && <p className="text-red-400 text-sm">{error}</p>}
-        <button
-          type="submit"
-          disabled={submitting}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm font-medium"
-        >
-          {submitting ? "Submitting..." : "Submit Task"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            disabled={submitting}
+            onClick={() => setBacklog(false)}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm font-medium"
+          >
+            {submitting && !backlog ? "Submitting..." : "Submit Task"}
+          </button>
+          <button
+            type="submit"
+            disabled={submitting}
+            onClick={() => setBacklog(true)}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded text-sm font-medium"
+          >
+            {submitting && backlog ? "Saving..." : "Save to Backlog"}
+          </button>
+        </div>
       </form>
 
       <div className="space-y-3">

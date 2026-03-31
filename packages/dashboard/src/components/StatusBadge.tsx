@@ -1,4 +1,5 @@
 const colors: Record<string, string> = {
+  backlog: "bg-gray-500",
   queued: "bg-gray-600",
   planning: "bg-blue-600",
   planned: "bg-indigo-600",
@@ -9,6 +10,7 @@ const colors: Record<string, string> = {
   success: "bg-green-600",
   failed: "bg-red-600",
   cancelled: "bg-gray-500",
+  closed: "bg-gray-400",
   pending: "bg-gray-600",
 };
 

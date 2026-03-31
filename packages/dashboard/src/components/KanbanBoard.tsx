@@ -1,7 +1,8 @@
-import type { Task } from "../api.js";
+import { resolvePreviewUrl, type Task } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
 
 const COLUMNS: { status: string; label: string; color: string }[] = [
+  { status: "backlog", label: "Backlog", color: "border-gray-500" },
   { status: "queued", label: "Queued", color: "border-gray-600" },
   { status: "planning", label: "Planning", color: "border-blue-600" },
   { status: "planned", label: "Planned", color: "border-indigo-600" },
@@ -11,6 +12,8 @@ const COLUMNS: { status: string; label: string; color: string }[] = [
   { status: "fixing", label: "Fixing", color: "border-purple-500" },
   { status: "success", label: "Done", color: "border-green-600" },
   { status: "failed", label: "Failed", color: "border-red-600" },
+  { status: "cancelled", label: "Cancelled", color: "border-gray-500" },
+  { status: "closed", label: "Closed", color: "border-gray-400" },
 ];
 
 export function KanbanBoard({
@@ -113,17 +116,30 @@ function KanbanCard({
           {task.branchName}
         </p>
       )}
-      {task.prUrl && (
-        <a
-          href={task.prUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="text-[10px] text-blue-400 hover:underline mt-1 inline-block"
-        >
-          View PR
-        </a>
-      )}
+      <div className="flex items-center gap-2 mt-1">
+        {task.prUrl && (
+          <a
+            href={task.prUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-[10px] text-blue-400 hover:underline"
+          >
+            PR
+          </a>
+        )}
+        {task.previewUrl && !["cancelled", "closed", "failed"].includes(task.status) && (
+          <a
+            href={resolvePreviewUrl(task.previewUrl)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-[10px] text-indigo-400 hover:underline"
+          >
+            Preview
+          </a>
+        )}
+      </div>
     </div>
   );
 }

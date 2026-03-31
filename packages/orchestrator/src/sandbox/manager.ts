@@ -16,6 +16,14 @@ export class SandboxManager {
     await sandbox.exec('git config --global user.name "Phil Agent"');
     await sandbox.exec('git config --global user.email "phil@agent.local"');
 
+    // Recover workspace if sandbox was recycled since planning phase
+    const wsCheck = await sandbox.exec("ls /workspace/.git 2>/dev/null && echo 'ok' || echo 'empty'");
+    if (wsCheck.stdout.trim() === "empty") {
+      const token = this.env.GITHUB_TOKEN ?? "";
+      const authedUrl = payload.repoContext.repoUrl.replace("https://", `https://x-access-token:${token}@`);
+      await sandbox.exec(`git clone ${authedUrl} /workspace 2>&1`);
+    }
+
     // Create feature branch (repo already cloned during planning phase)
     await sandbox.exec(`git checkout -b ${payload.branchName}`, { cwd: "/workspace" });
 
@@ -39,8 +47,9 @@ export class SandboxManager {
     sandbox: SandboxInstance,
     payload: DispatchPayload,
     onLog: (message: string) => Promise<void>,
-  ): Promise<{ prUrl?: string }> {
-    return runAgentLoop(sandbox, payload, this.env, onLog);
+    onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
+  ): Promise<{ prUrl?: string; previewUrl?: string }> {
+    return runAgentLoop(sandbox, payload, this.env, onLog, onResult);
   }
 
   async destroy(taskId: string): Promise<void> {
@@ -56,20 +65,27 @@ export class SandboxManager {
   async analyzeRepo(
     repoUrl: string,
     taskId: string,
-  ): Promise<{ structure: string[]; projectType: string; defaultBranch: string }> {
+  ): Promise<{ structure: string[]; projectType: string; defaultBranch: string; claudeMd?: string }> {
     const sandboxId = `task-${taskId}`.toLowerCase();
     const sandbox = getSandbox(this.env.Sandbox, sandboxId, {
       keepAlive: true,
     });
 
-    // Clone repo (embed token in URL for HTTPS auth)
+    // Clone repo if not already present (reuse on revision / sandbox recycle)
     const token = this.env.GITHUB_TOKEN ?? "";
     const authedUrl = token
       ? repoUrl.replace("https://", `https://x-access-token:${token}@`)
       : repoUrl;
-    await sandbox.exec(`git clone --depth 1 ${authedUrl} /workspace`, {
-      env: { GIT_TERMINAL_PROMPT: "0" },
-    });
+    const wsCheck = await sandbox.exec("ls /workspace/.git 2>/dev/null && echo 'ok' || echo 'empty'");
+    if (wsCheck.stdout.trim() === "empty") {
+      await sandbox.exec(`git clone --depth 1 ${authedUrl} /workspace`, {
+        env: { GIT_TERMINAL_PROMPT: "0" },
+      });
+    } else {
+      // Pull latest changes in case repo was updated
+      await sandbox.exec(`git fetch origin 2>/dev/null || true`, { cwd: "/workspace" });
+      await sandbox.exec(`git reset --hard origin/HEAD 2>/dev/null || true`, { cwd: "/workspace" });
+    }
     // Remove token from remote URL after clone
     if (token) {
       await sandbox.exec(`git remote set-url origin ${repoUrl}`, { cwd: "/workspace" });
@@ -107,6 +123,15 @@ export class SandboxManager {
     else if (files.includes("go.mod")) projectType = "go";
     else if (files.includes("pom.xml") || files.includes("build.gradle")) projectType = "java";
 
-    return { structure, projectType, defaultBranch };
+    // Read CLAUDE.md if it exists (project-level instructions)
+    const claudeMdResult = await sandbox.exec(
+      'cat CLAUDE.md 2>/dev/null || true',
+      { cwd: "/workspace" },
+    );
+    const claudeMd = claudeMdResult.success && claudeMdResult.stdout.trim()
+      ? claudeMdResult.stdout.trim()
+      : undefined;
+
+    return { structure, projectType, defaultBranch, claudeMd };
   }
 }

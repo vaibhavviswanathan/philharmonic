@@ -1,4 +1,5 @@
 export type TaskStatus =
+  | "backlog"
   | "queued"
   | "planning"
   | "planned"
@@ -8,7 +9,8 @@ export type TaskStatus =
   | "fixing"
   | "success"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "closed";
 
 export type AutonomyLevel = "full" | "high" | "moderate" | "supervised";
 
@@ -33,8 +35,11 @@ export interface Task {
   branchName: string;
   subtasks: Subtask[];
   touchSet: string[];
+  /** Human-readable execution plan (markdown) — shown for review in "planned" state */
+  planMarkdown?: string;
   prUrl?: string;
   prNumber?: number;
+  previewUrl?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;

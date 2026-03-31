@@ -16,4 +16,5 @@ export interface Env {
 
   // Vars
   WORKER_URL?: string;
+  PREVIEW_HOSTNAME?: string;
 }

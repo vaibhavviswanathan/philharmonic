@@ -14,8 +14,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
 
-# Install pnpm globally
-RUN npm install -g pnpm
+# Install pnpm and Claude Code CLI
+RUN npm install -g pnpm @anthropic-ai/claude-code
 
 # Workspace for cloned repos
 RUN mkdir -p /workspace
