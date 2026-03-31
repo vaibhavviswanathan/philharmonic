@@ -106,10 +106,15 @@ app.put("/v1/projects/:id", async (c) => {
 
 app.delete("/v1/projects/:id", async (c) => {
   const coordinator = getCoordinator(c.env);
-  const project = await doRpc<Project | null>(coordinator, "getProject", c.req.param("id"));
-  if (!project) return c.json({ error: "Project not found" }, 404);
-  await doRpc(coordinator, "deleteProject", c.req.param("id"));
-  return c.json({ ok: true });
+  try {
+    const project = await doRpc<Project | null>(coordinator, "getProject", c.req.param("id"));
+    if (!project) return c.json({ error: "Project not found" }, 404);
+    await doRpc(coordinator, "deleteProject", c.req.param("id"));
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("Delete project error:", err);
+    return c.json({ error: String(err) }, 500);
+  }
 });
 
 // --- Tasks API ---

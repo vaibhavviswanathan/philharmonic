@@ -256,17 +256,31 @@ export class TaskCoordinator extends DurableObject<Env> {
   }
 
   async deleteProject(id: string): Promise<void> {
-    // Delete all tasks and their subtasks/logs for this project
+    // Delete all tasks and their subtasks/logs/events for this project
     const tasks = this.ctx.storage.sql.exec(
       `SELECT id FROM tasks WHERE project_id = ?`, id
     ).toArray();
-    for (const t of tasks) {
-      const taskId = t.id as string;
-      this.ctx.storage.sql.exec(`DELETE FROM subtasks WHERE task_id = ?`, taskId);
-      this.ctx.storage.sql.exec(`DELETE FROM logs WHERE task_id = ?`, taskId);
+    const taskIds = tasks.map((t) => t.id as string);
+    for (const taskId of taskIds) {
+      try { this.ctx.storage.sql.exec(`DELETE FROM subtasks WHERE task_id = ?`, taskId); } catch { /* ignore */ }
+      try { this.ctx.storage.sql.exec(`DELETE FROM events WHERE task_id = ?`, taskId); } catch { /* ignore */ }
+      try { this.ctx.storage.sql.exec(`DELETE FROM review_comments WHERE task_id = ?`, taskId); } catch { /* ignore */ }
+      try { this.ctx.storage.sql.exec(`DELETE FROM escalations WHERE task_id = ?`, taskId); } catch { /* ignore */ }
     }
     this.ctx.storage.sql.exec(`DELETE FROM tasks WHERE project_id = ?`, id);
     this.ctx.storage.sql.exec(`DELETE FROM projects WHERE id = ?`, id);
+
+    // Clean up DO storage keys referencing deleted tasks
+    const cleanList = async (key: string) => {
+      const list = await this.ctx.storage.get<string[]>(key) ?? [];
+      const filtered = list.filter((tid) => !taskIds.includes(tid));
+      await this.ctx.storage.put(key, filtered);
+    };
+    await cleanList("pending_tasks");
+    await cleanList("running_tasks");
+    await cleanList("approved_tasks");
+    await cleanList("watching_tasks");
+    await cleanList("pending_review_fixes");
   }
 
   // --- Task CRUD ---
@@ -334,6 +348,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     if (updates.reviewCycles !== undefined) { sets.push(`review_cycles = ?`); params.push(updates.reviewCycles); }
     if (updates.previewUrl !== undefined) { sets.push(`preview_url = ?`); params.push(updates.previewUrl ?? null); }
     if (updates.planMarkdown !== undefined) { sets.push(`plan_markdown = ?`); params.push(updates.planMarkdown); }
+    if (updates.dependsOn !== undefined) { sets.push(`depends_on = ?`); params.push(JSON.stringify(updates.dependsOn)); }
 
     params.push(id);
     this.ctx.storage.sql.exec(
@@ -662,13 +677,28 @@ export class TaskCoordinator extends DurableObject<Env> {
 
     const result = await planTask(taskId, task.repoUrl, task.description, env);
 
+    // Auto-infer dependencies: if this task's touch set overlaps with any
+    // earlier non-terminal task in the same project, depend on it.
+    const inferredDeps = await this.inferDependencies(
+      taskId,
+      task.projectId,
+      result.payload.touchSet,
+      task.createdAt,
+    );
+    const allDeps = [...new Set([...(task.dependsOn ?? []), ...inferredDeps])];
+
     await this.updateTask(taskId, {
       status: "planned",
       branchName: result.payload.branchName,
       subtasks: result.payload.subtasks,
       touchSet: result.payload.touchSet,
       planMarkdown: result.planMarkdown,
+      dependsOn: allDeps,
     });
+
+    if (inferredDeps.length > 0) {
+      await this.appendLog(taskId, "", `Auto-inferred ${inferredDeps.length} dependency(ies) from overlapping files`, "info");
+    }
 
     // Check if we should auto-approve based on project autonomy level
     const project = task.projectId ? await this.getProject(task.projectId) : null;
@@ -685,6 +715,54 @@ export class TaskCoordinator extends DurableObject<Env> {
     } else {
       await this.appendLog(taskId, "", `Plan ready for review: ${result.payload.subtasks.length} subtasks. Waiting for approval.`, "info");
     }
+  }
+
+  /**
+   * Infer dependencies by checking touch-set overlap with earlier non-terminal tasks.
+   * Returns task IDs that this task should depend on.
+   */
+  private async inferDependencies(
+    taskId: string,
+    projectId: string,
+    touchSet: string[],
+    createdAt: string,
+  ): Promise<string[]> {
+    if (touchSet.length === 0) return [];
+
+    const terminalStatuses = ["success", "failed", "cancelled", "closed"];
+    const rows = this.ctx.storage.sql.exec(
+      `SELECT id, touch_set, created_at FROM tasks WHERE project_id = ? AND id != ?`,
+      projectId,
+      taskId,
+    ).toArray();
+
+    const deps: string[] = [];
+    const touchSetLookup = new Set(touchSet);
+
+    for (const row of rows) {
+      const status = (this.ctx.storage.sql.exec(
+        `SELECT status FROM tasks WHERE id = ?`, row.id as string,
+      ).toArray()[0]?.status as string) ?? "";
+
+      if (terminalStatuses.includes(status)) continue;
+
+      const otherTouchSet: string[] = (() => {
+        try { return JSON.parse((row.touch_set as string) || "[]"); }
+        catch { return []; }
+      })();
+      if (otherTouchSet.length === 0) continue;
+
+      // Check overlap
+      const hasOverlap = otherTouchSet.some((f) => touchSetLookup.has(f));
+      if (!hasOverlap) continue;
+
+      // Only depend on tasks created before this one (avoid circular deps)
+      if ((row.created_at as string) < createdAt) {
+        deps.push(row.id as string);
+      }
+    }
+
+    return deps;
   }
 
   /**
