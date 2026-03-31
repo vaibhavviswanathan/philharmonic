@@ -968,6 +968,24 @@ export class TaskCoordinator extends DurableObject<Env> {
       await this.appendLog(taskId, `task-${taskId}`, msg, "info");
     });
 
+    // Store review-fix context (appends to existing context)
+    if (result.agentContext) {
+      const existing = await this.getContext(taskId);
+      if (existing) {
+        // Append review-fix context to existing
+        try {
+          const prev = JSON.parse(existing);
+          const next = JSON.parse(result.agentContext);
+          prev.push({ type: "text", content: "--- Review Fix ---" }, ...next);
+          await this.storeContext(taskId, JSON.stringify(prev));
+        } catch {
+          await this.storeContext(taskId, result.agentContext);
+        }
+      } else {
+        await this.storeContext(taskId, result.agentContext);
+      }
+    }
+
     // Mark reviews as processed
     await this.markReviewsProcessed(taskId, reviews.map((r) => r.id));
 

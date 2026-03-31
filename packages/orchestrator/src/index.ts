@@ -734,60 +734,6 @@ app.post("/v1/tasks/:id/expose", async (c) => {
   }
 });
 
-// Debug endpoint: inspect sandbox state for a task
-app.get("/v1/tasks/:id/debug-sandbox", async (c) => {
-  const taskId = c.req.param("id");
-  const sandboxId = `task-${taskId}`.toLowerCase();
-  const sandbox = getSandbox(c.env.Sandbox, sandboxId);
-  const results: Record<string, string> = {};
-
-  try {
-    const ports = await sandbox.exec("ss -tlnp 2>/dev/null || true");
-    results.ports = ports.stdout;
-  } catch (e) { results.ports = `error: ${e}`; }
-
-  try {
-    const pkg = await sandbox.exec("cat /workspace/package.json 2>/dev/null || echo 'not found'");
-    results.packageJson = pkg.stdout.slice(0, 500);
-  } catch (e) { results.packageJson = `error: ${e}`; }
-
-  try {
-    const serverLog = await sandbox.exec("cat /tmp/dev-server.log 2>/dev/null || echo 'no log'");
-    results.devServerLog = serverLog.stdout.slice(0, 500);
-  } catch (e) { results.devServerLog = `error: ${e}`; }
-
-  try {
-    const ps = await sandbox.exec("ps aux 2>/dev/null || true");
-    results.processes = ps.stdout;
-  } catch (e) { results.processes = `error: ${e}`; }
-
-  try {
-    const ls = await sandbox.exec("ls /workspace/ 2>/dev/null || true");
-    results.workspaceFiles = ls.stdout;
-  } catch (e) { results.workspaceFiles = `error: ${e}`; }
-
-  try {
-    const nodeModules = await sandbox.exec("ls /workspace/node_modules/.package-lock.json 2>/dev/null && echo 'installed' || echo 'not installed'");
-    results.nodeModules = nodeModules.stdout.trim();
-  } catch (e) { results.nodeModules = `error: ${e}`; }
-
-  return c.json(results);
-});
-
-// Debug: run a command in a task's sandbox
-app.post("/v1/tasks/:id/debug-exec", async (c) => {
-  const taskId = c.req.param("id");
-  const { cmd } = await c.req.json<{ cmd: string }>();
-  const sandboxId = `task-${taskId}`.toLowerCase();
-  const sandbox = getSandbox(c.env.Sandbox, sandboxId);
-  try {
-    const result = await sandbox.exec(cmd, { cwd: "/workspace" });
-    return c.json({ success: result.success, stdout: result.stdout.slice(0, 2000), stderr: (result.stderr ?? "").slice(0, 2000) });
-  } catch (e) {
-    return c.json({ error: String(e) });
-  }
-});
-
 app.get("/health", (c) => c.json({ status: "ok" }));
 
 

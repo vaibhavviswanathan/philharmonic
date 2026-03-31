@@ -12,7 +12,7 @@ export async function runReviewFixLoop(
   reviewContext: string,
   env: Env,
   onLog: (message: string) => Promise<void>,
-): Promise<{ pushed: boolean }> {
+): Promise<{ pushed: boolean; agentContext?: string }> {
   const token = env.GITHUB_TOKEN ?? "";
 
   // Ensure git credentials are set (sandbox may have been restarted)
@@ -123,6 +123,32 @@ ${reviewContext}
     await sandbox.exec("pkill -f 'claude.*-p' 2>/dev/null || true");
   }
 
+  // Capture agent context for the context inspector
+  let agentContext: string | undefined;
+  try {
+    const ctxResult = await sandbox.exec("cat /tmp/claude-output.jsonl 2>/dev/null || true");
+    if (ctxResult.success && ctxResult.stdout.trim()) {
+      const lines = ctxResult.stdout.split("\n").filter(Boolean);
+      const summary: Array<{ type: string; content: string }> = [];
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "stream_event") {
+            const e = event.event;
+            if (e?.type === "tool_use") {
+              summary.push({ type: "tool", content: `${e.name}: ${JSON.stringify(e.input ?? {}).slice(0, 500)}` });
+            } else if (e?.type === "text" && e?.text) {
+              summary.push({ type: "text", content: e.text.slice(0, 1000) });
+            }
+          } else if (event.type === "result") {
+            summary.push({ type: "result", content: JSON.stringify(event).slice(0, 2000) });
+          }
+        } catch { /* skip */ }
+      }
+      agentContext = JSON.stringify(summary);
+    }
+  } catch { /* best effort */ }
+
   // Check if changes were pushed
   let pushed = false;
   try {
@@ -146,5 +172,5 @@ ${reviewContext}
     // Assume pushed if Claude Code didn't error
   }
 
-  return { pushed };
+  return { pushed, agentContext };
 }
