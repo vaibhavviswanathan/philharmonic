@@ -22,6 +22,7 @@ export const CreateTaskSchema = z.object({
   projectId: z.string().min(1),
   description: z.string().min(1).max(2000),
   backlog: z.boolean().optional(),
+  dependsOn: z.array(z.string()).optional(),
 });
 
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;

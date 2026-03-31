@@ -300,7 +300,18 @@ function layoutGraph(tasks: Task[]): {
   // Build subtask dependency edges within a task
   const edges: Edge[] = [];
 
-  // Build blockedBy edges
+  // Build explicit dependency edges
+  for (const task of tasks) {
+    if (task.dependsOn) {
+      for (const depId of task.dependsOn) {
+        if (tasks.find((t) => t.id === depId)) {
+          edges.push({ from: depId, to: task.id, label: "depends" });
+        }
+      }
+    }
+  }
+
+  // Build blockedBy edges (touch-set conflicts)
   for (const task of tasks) {
     if (task.blockedBy && tasks.find((t) => t.id === task.blockedBy)) {
       edges.push({ from: task.blockedBy, to: task.id, label: "blocks" });

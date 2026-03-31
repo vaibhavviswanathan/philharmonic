@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { getTask, getLogs, mergeTask, closeTask, cancelTask, startTask, resolvePreviewUrl, subscribeToEvents, type Task, type PhilEvent } from "../api.js";
+import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTask, resolvePreviewUrl, subscribeToEvents, type Task, type PhilEvent, type ContextEntry } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { PlanReview } from "./PlanReview.js";
@@ -233,6 +233,11 @@ export function TaskDetail({
         <ChatPanel taskId={taskId} />
       )}
 
+      {/* Context Inspector — show for completed/reviewing tasks */}
+      {["reviewing", "fixing", "success", "failed", "closed"].includes(task.status) && (
+        <ContextInspector taskId={taskId} />
+      )}
+
       <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
         <h3 className="text-sm font-semibold mb-2">Agent Logs</h3>
         <div className="bg-black rounded p-3 max-h-96 overflow-y-auto font-mono text-xs space-y-0.5">
@@ -264,6 +269,61 @@ export function TaskDetail({
           <div ref={logsEndRef} />
         </div>
       </div>
+    </div>
+  );
+}
+
+function ContextInspector({ taskId }: { taskId: string }) {
+  const [context, setContext] = useState<ContextEntry[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = () => {
+    if (loaded) return;
+    setLoaded(true);
+    getContext(taskId).then(setContext);
+  };
+
+  return (
+    <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
+      <button
+        onClick={() => { setOpen(!open); load(); }}
+        className="flex items-center gap-2 text-sm font-semibold w-full text-left"
+      >
+        <svg
+          className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          strokeWidth={3}
+        >
+          <path d="M9 5l7 7-7 7" />
+        </svg>
+        Agent Context Inspector
+        {context && <span className="text-xs text-gray-500 font-normal ml-2">({context.length} entries)</span>}
+      </button>
+      {open && (
+        <div className="mt-3 max-h-[500px] overflow-y-auto space-y-1.5">
+          {!context && <p className="text-gray-500 text-xs">Loading...</p>}
+          {context && context.length === 0 && <p className="text-gray-500 text-xs">No context captured for this task.</p>}
+          {context?.map((entry, i) => (
+            <div key={i} className={`text-xs font-mono p-2 rounded ${
+              entry.type === "tool" ? "bg-blue-950/50 border border-blue-900/50" :
+              entry.type === "result" ? "bg-green-950/50 border border-green-900/50" :
+              "bg-gray-800/50 border border-gray-700/50"
+            }`}>
+              <span className={`font-semibold ${
+                entry.type === "tool" ? "text-blue-400" :
+                entry.type === "result" ? "text-green-400" :
+                "text-gray-400"
+              }`}>
+                {entry.type === "tool" ? "Tool" : entry.type === "result" ? "Result" : "Text"}
+              </span>
+              <pre className="mt-1 text-gray-300 whitespace-pre-wrap break-all">{entry.content}</pre>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

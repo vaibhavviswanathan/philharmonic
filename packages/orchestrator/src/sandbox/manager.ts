@@ -48,7 +48,7 @@ export class SandboxManager {
     payload: DispatchPayload,
     onLog: (message: string) => Promise<void>,
     onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
-  ): Promise<{ prUrl?: string; previewUrl?: string }> {
+  ): Promise<{ prUrl?: string; previewUrl?: string; agentContext?: string }> {
     return runAgentLoop(sandbox, payload, this.env, onLog, onResult);
   }
 

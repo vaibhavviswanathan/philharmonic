@@ -25,6 +25,8 @@ export class TaskCoordinator extends DurableObject<Env> {
         { col: "review_cycles", sql: `ALTER TABLE tasks ADD COLUMN review_cycles INTEGER NOT NULL DEFAULT 0` },
         { col: "preview_url", sql: `ALTER TABLE tasks ADD COLUMN preview_url TEXT` },
         { col: "plan_markdown", sql: `ALTER TABLE tasks ADD COLUMN plan_markdown TEXT` },
+        { col: "depends_on", sql: `ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'` },
+        { col: "agent_context", sql: `ALTER TABLE tasks ADD COLUMN agent_context TEXT` },
       ];
       for (const m of migrations) {
         if (!cols.has(m.col)) {
@@ -78,6 +80,8 @@ export class TaskCoordinator extends DurableObject<Env> {
         preview_url TEXT,
         error TEXT,
         blocked_by TEXT,
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        agent_context TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -264,8 +268,8 @@ export class TaskCoordinator extends DurableObject<Env> {
   async createTask(task: Task): Promise<Task> {
     this.ensureReady();
     this.ctx.storage.sql.exec(
-      `INSERT INTO tasks (id, project_id, repo_url, description, status, branch_name, touch_set, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, project_id, repo_url, description, status, branch_name, touch_set, depends_on, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       task.id,
       task.projectId,
       task.repoUrl,
@@ -273,6 +277,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       task.status,
       task.branchName,
       JSON.stringify(task.touchSet),
+      JSON.stringify(task.dependsOn ?? []),
       task.createdAt,
       task.updatedAt,
     );
@@ -455,6 +460,26 @@ export class TaskCoordinator extends DurableObject<Env> {
       const task = await this.getTask(taskId);
       if (!task || task.status === "cancelled" || task.status === "failed") continue;
       if (task.status !== "planned" && task.status !== "blocked") continue;
+
+      // DAG check: all dependsOn tasks must be "success" before dispatching
+      if (task.dependsOn && task.dependsOn.length > 0) {
+        const depsMet = task.dependsOn.every((depId) => {
+          const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
+          return row && (row.status as string) === "success";
+        });
+        if (!depsMet) {
+          if (task.status !== "blocked") {
+            const pendingDeps = task.dependsOn.filter((depId) => {
+              const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
+              return !row || (row.status as string) !== "success";
+            });
+            await this.updateTask(taskId, { status: "blocked" });
+            await this.appendLog(taskId, "", `Waiting on dependencies: ${pendingDeps.join(", ")}`, "info");
+          }
+          stillPending.push(taskId);
+          continue;
+        }
+      }
 
       if (running.length + toRun.length >= TaskCoordinator.MAX_CONCURRENT) {
         stillPending.push(taskId);
@@ -771,6 +796,12 @@ export class TaskCoordinator extends DurableObject<Env> {
       });
 
       await this.updateTask(taskId, { status: "reviewing", prUrl: result.prUrl, previewUrl: result.previewUrl });
+
+      // Store agent context for post-hoc inspection
+      if (result.agentContext) {
+        await this.storeContext(taskId, result.agentContext);
+      }
+
       await this.appendLog(taskId, "", "PR created — sandbox kept alive for review fixes", "info");
       if (result.previewUrl) {
         await this.appendLog(taskId, "", `Preview available at ${result.previewUrl}`, "info");
@@ -1173,6 +1204,24 @@ export class TaskCoordinator extends DurableObject<Env> {
     }
   }
 
+  // --- Agent Context ---
+
+  async storeContext(taskId: string, context: string): Promise<void> {
+    this.ensureReady();
+    this.ctx.storage.sql.exec(
+      `UPDATE tasks SET agent_context = ?, updated_at = ? WHERE id = ?`,
+      context, new Date().toISOString(), taskId,
+    );
+  }
+
+  async getContext(taskId: string): Promise<string | null> {
+    if (!this.schemaReady) return null;
+    const row = this.ctx.storage.sql.exec(
+      `SELECT agent_context FROM tasks WHERE id = ?`, taskId,
+    ).one();
+    return (row?.agent_context as string) ?? null;
+  }
+
   // --- WebSocket for real-time dashboard ---
 
   async fetch(request: Request): Promise<Response> {
@@ -1247,6 +1296,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       updatedAt: row.updated_at as string,
       error: row.error as string | undefined,
       blockedBy: row.blocked_by as string | undefined,
+      dependsOn: JSON.parse((row.depends_on as string) || "[]"),
       reviewCycles: (row.review_cycles as number) || 0,
     };
   }

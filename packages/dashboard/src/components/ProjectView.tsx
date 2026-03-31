@@ -20,6 +20,7 @@ export function ProjectView({
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [backlog, setBacklog] = useState(false);
+  const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
 
@@ -38,9 +39,10 @@ export function ProjectView({
     setSubmitting(true);
     setError("");
     try {
-      await createTask(project.id, description, backlog);
+      await createTask(project.id, description, backlog, selectedDeps.length > 0 ? selectedDeps : undefined);
       setDescription("");
       setBacklog(false);
+      setSelectedDeps([]);
       refresh();
     } catch (err) {
       setError(String(err));
@@ -105,6 +107,31 @@ export function ProjectView({
           className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
         />
         {error && <p className="text-red-400 text-sm">{error}</p>}
+        {tasks.length > 0 && (
+          <details className="text-sm">
+            <summary className="text-gray-400 cursor-pointer hover:text-gray-300">
+              Dependencies {selectedDeps.length > 0 && `(${selectedDeps.length})`}
+            </summary>
+            <div className="mt-2 max-h-32 overflow-y-auto space-y-1">
+              {tasks.filter((t) => t.status !== "cancelled" && t.status !== "closed").map((t) => (
+                <label key={t.id} className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selectedDeps.includes(t.id)}
+                    onChange={(e) => {
+                      setSelectedDeps((prev) =>
+                        e.target.checked ? [...prev, t.id] : prev.filter((d) => d !== t.id)
+                      );
+                    }}
+                    className="rounded border-gray-600"
+                  />
+                  <span className="truncate">{t.description.slice(0, 60)}</span>
+                  <span className="text-gray-500 flex-shrink-0">({t.status})</span>
+                </label>
+              ))}
+            </div>
+          </details>
+        )}
         <div className="flex items-center gap-3">
           <button
             type="submit"

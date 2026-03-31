@@ -45,6 +45,8 @@ export interface Task {
   error?: string;
   /** ID of the task blocking this one (touch-set conflict) */
   blockedBy?: string;
+  /** Explicit task dependency IDs — task won't dispatch until all are "success" */
+  dependsOn?: string[];
   /** Number of review iterations completed */
   reviewCycles?: number;
 }

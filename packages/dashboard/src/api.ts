@@ -33,6 +33,7 @@ export interface Task {
   updatedAt: string;
   error?: string;
   blockedBy?: string;
+  dependsOn?: string[];
   reviewCycles?: number;
 }
 
@@ -110,11 +111,11 @@ export async function deleteProject(id: string): Promise<void> {
 
 // --- Tasks ---
 
-export async function createTask(projectId: string, description: string, backlog?: boolean): Promise<Task> {
+export async function createTask(projectId: string, description: string, backlog?: boolean, dependsOn?: string[]): Promise<Task> {
   const res = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ projectId, description, backlog }),
+    body: JSON.stringify({ projectId, description, backlog, dependsOn }),
   });
   if (!res.ok) throw new Error(`Failed to create task: ${res.statusText}`);
   return res.json();
@@ -234,6 +235,20 @@ export function resolvePreviewUrl(previewUrl: string): string {
   // Relative path like /preview/taskId/ — prepend API origin
   const origin = API_BASE.replace(/\/v1$/, "");
   return `${origin}${previewUrl}`;
+}
+
+// --- Agent Context ---
+
+export interface ContextEntry {
+  type: "tool" | "text" | "result";
+  content: string;
+}
+
+export async function getContext(taskId: string): Promise<ContextEntry[] | null> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/context`);
+  if (!res.ok) return null;
+  const data = await res.json() as { context: ContextEntry[] | null };
+  return data.context;
 }
 
 // --- Logs ---

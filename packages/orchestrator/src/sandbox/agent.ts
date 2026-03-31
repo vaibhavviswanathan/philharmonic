@@ -83,7 +83,7 @@ export async function runAgentLoop(
   env: Env,
   onLog: (message: string) => Promise<void>,
   onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
-): Promise<{ prUrl?: string; previewUrl?: string }> {
+): Promise<{ prUrl?: string; previewUrl?: string; agentContext?: string }> {
   const prompt = buildPrompt(payload);
   const systemAppend = buildSystemAppend();
 
@@ -174,6 +174,33 @@ export async function runAgentLoop(
     await sandbox.exec("pkill -f 'claude.*-p' 2>/dev/null || true");
   }
 
+  // Capture agent context (the full NDJSON output) for post-hoc inspection
+  let agentContext: string | undefined;
+  try {
+    const ctxResult = await sandbox.exec("cat /tmp/claude-output.jsonl 2>/dev/null || true");
+    if (ctxResult.success && ctxResult.stdout.trim()) {
+      // Extract tool calls and text responses for a structured summary
+      const lines = ctxResult.stdout.split("\n").filter(Boolean);
+      const summary: Array<{ type: string; content: string }> = [];
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "stream_event") {
+            const e = event.event;
+            if (e?.type === "tool_use") {
+              summary.push({ type: "tool", content: `${e.name}: ${JSON.stringify(e.input ?? {}).slice(0, 500)}` });
+            } else if (e?.type === "text" && e?.text) {
+              summary.push({ type: "text", content: e.text.slice(0, 1000) });
+            }
+          } else if (event.type === "result") {
+            summary.push({ type: "result", content: JSON.stringify(event).slice(0, 2000) });
+          }
+        } catch { /* skip non-JSON lines */ }
+      }
+      agentContext = JSON.stringify(summary);
+    }
+  } catch { /* best effort */ }
+
   // Post-processing: extract PR URL
   let prUrl: string | undefined;
   try {
@@ -245,5 +272,5 @@ export async function runAgentLoop(
     await onLog(`Preview expose failed: ${err}`);
   }
 
-  return { prUrl, previewUrl };
+  return { prUrl, previewUrl, agentContext };
 }

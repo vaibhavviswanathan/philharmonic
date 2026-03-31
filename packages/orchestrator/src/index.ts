@@ -136,6 +136,7 @@ app.post("/v1/tasks", async (c) => {
     branchName: `phil/${nanoid(8)}`,
     subtasks: [],
     touchSet: [],
+    dependsOn: parsed.data.dependsOn ?? [],
     createdAt: now,
     updatedAt: now,
   };
@@ -178,6 +179,13 @@ app.get("/v1/tasks/:id/events", async (c) => {
     coordinator, "getEvents", c.req.param("id"),
   );
   return c.json(events);
+});
+
+app.get("/v1/tasks/:id/context", async (c) => {
+  const coordinator = getCoordinator(c.env);
+  const context = await doRpc<string | null>(coordinator, "getContext", c.req.param("id"));
+  if (!context) return c.json({ context: null });
+  return c.json({ context: JSON.parse(context) });
 });
 
 app.delete("/v1/tasks/:id", async (c) => {
