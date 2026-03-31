@@ -16,6 +16,7 @@ import {
 import type { Env } from "./env.js";
 import { TaskCoordinator } from "./state/task-do.js";
 import { SandboxManager } from "./sandbox/manager.js";
+import tasksRoutes from "./routes/tasks.js";
 
 export { TaskCoordinator };
 
@@ -767,6 +768,8 @@ app.post("/v1/tasks/:id/expose", async (c) => {
     return c.json({ error: `Failed to expose port: ${err}` }, 500);
   }
 });
+
+app.route("/v1/tasks", tasksRoutes);
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
