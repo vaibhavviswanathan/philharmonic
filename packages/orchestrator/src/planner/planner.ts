@@ -1,10 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { DispatchPayload, Subtask, RepoContext } from "@phil/shared";
 import { SandboxManager } from "../sandbox/manager.js";
-import { PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt } from "./prompts.js";
+import { PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, buildPlannerRevisionPrompt } from "./prompts.js";
 import type { Env } from "../env.js";
 
 interface PlannerOutput {
+  planMarkdown: string;
   subtasks: Array<{
     id: string;
     description: string;
@@ -15,16 +16,21 @@ interface PlannerOutput {
   branchName: string;
 }
 
+export interface PlanResult {
+  payload: DispatchPayload;
+  planMarkdown: string;
+}
+
 export async function planTask(
   taskId: string,
   repoUrl: string,
   description: string,
   env: Env,
-): Promise<DispatchPayload> {
+): Promise<PlanResult> {
   const sandboxManager = new SandboxManager(env);
 
   // Use sandbox to clone and analyze repo
-  const { structure, projectType, defaultBranch } = await sandboxManager.analyzeRepo(repoUrl, taskId);
+  const { structure, projectType, defaultBranch, claudeMd } = await sandboxManager.analyzeRepo(repoUrl, taskId);
 
   const repoContext: RepoContext = {
     repoUrl,
@@ -33,14 +39,94 @@ export async function planTask(
     structure,
   };
 
-  // Ask Claude to plan the task
-  const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const userPrompt = buildPlannerUserPrompt(
+  const plan = await callPlanner(env, buildPlannerUserPrompt(
     description,
     repoUrl,
     structure,
     projectType,
-  );
+    claudeMd,
+  ));
+
+  const subtasks: Subtask[] = plan.subtasks.map((s) => ({
+    id: s.id,
+    description: s.description,
+    status: "pending",
+    dependencies: s.dependencies,
+    fileTargets: s.fileTargets,
+  }));
+
+  const workerUrl = env.WORKER_URL ?? "";
+  return {
+    payload: {
+      taskId,
+      branchName: plan.branchName,
+      repoContext,
+      subtasks,
+      touchSet: plan.touchSet,
+      callbackUrl: `${workerUrl}/internal/sandboxes/${taskId}`,
+    },
+    planMarkdown: plan.planMarkdown,
+  };
+}
+
+/**
+ * Revise a plan based on developer feedback.
+ * Reuses the existing sandbox (repo already cloned).
+ */
+export async function revisePlan(
+  taskId: string,
+  repoUrl: string,
+  description: string,
+  previousPlanMarkdown: string,
+  feedback: string,
+  env: Env,
+): Promise<PlanResult> {
+  const sandboxManager = new SandboxManager(env);
+
+  // Re-analyze repo (sandbox still has it from initial planning)
+  const { structure, projectType, defaultBranch, claudeMd } = await sandboxManager.analyzeRepo(repoUrl, taskId);
+
+  const repoContext: RepoContext = {
+    repoUrl,
+    defaultBranch,
+    projectType,
+    structure,
+  };
+
+  const plan = await callPlanner(env, buildPlannerRevisionPrompt(
+    description,
+    repoUrl,
+    structure,
+    projectType,
+    previousPlanMarkdown,
+    feedback,
+    claudeMd,
+  ));
+
+  const subtasks: Subtask[] = plan.subtasks.map((s) => ({
+    id: s.id,
+    description: s.description,
+    status: "pending",
+    dependencies: s.dependencies,
+    fileTargets: s.fileTargets,
+  }));
+
+  const workerUrl = env.WORKER_URL ?? "";
+  return {
+    payload: {
+      taskId,
+      branchName: plan.branchName,
+      repoContext,
+      subtasks,
+      touchSet: plan.touchSet,
+      callbackUrl: `${workerUrl}/internal/sandboxes/${taskId}`,
+    },
+    planMarkdown: plan.planMarkdown,
+  };
+}
+
+async function callPlanner(env: Env, userPrompt: string): Promise<PlannerOutput> {
+  const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
   const response = await anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
@@ -61,21 +147,12 @@ export async function planTask(
     throw new Error(`Planner returned invalid JSON: ${textBlock.text.slice(0, 200)}`);
   }
 
-  const subtasks: Subtask[] = plan.subtasks.map((s) => ({
-    id: s.id,
-    description: s.description,
-    status: "pending",
-    dependencies: s.dependencies,
-    fileTargets: s.fileTargets,
-  }));
+  // Ensure planMarkdown exists (backwards compat with older prompt format)
+  if (!plan.planMarkdown) {
+    plan.planMarkdown = plan.subtasks
+      .map((s, i) => `${i + 1}. **${s.id}**: ${s.description}\n   Files: ${s.fileTargets.join(", ")}`)
+      .join("\n");
+  }
 
-  const workerUrl = env.WORKER_URL ?? "";
-  return {
-    taskId,
-    branchName: plan.branchName,
-    repoContext,
-    subtasks,
-    touchSet: plan.touchSet,
-    callbackUrl: `${workerUrl}/internal/sandboxes/${taskId}`,
-  };
+  return plan;
 }

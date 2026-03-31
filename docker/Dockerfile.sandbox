@@ -1,24 +1,24 @@
-FROM node:20-slim
+FROM docker.io/cloudflare/sandbox:0.7.20
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    python3 \
-    python3-pip \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Add tools needed by the coding agent
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh \
-    && rm -rf /var/lib/apt/lists/*
+# Install gh CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install pnpm globally
-RUN npm install -g pnpm
+# Install pnpm and Claude Code CLI
+RUN npm install -g pnpm @anthropic-ai/claude-code
 
-WORKDIR /workspace
+# Workspace for cloned repos
+RUN mkdir -p /workspace
+
+# Required for local dev port exposure
 EXPOSE 8080
-
-# Keep the container alive for the Sandbox SDK to exec into
-CMD ["node", "-e", "const http = require('http'); http.createServer((_, res) => res.end('ok')).listen(8080)"]

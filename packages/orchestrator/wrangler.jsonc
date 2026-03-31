@@ -3,6 +3,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
   "durable_objects": {
     "bindings": [
       {
@@ -33,8 +34,13 @@
     }
   ],
   "vars": {
-    "WORKER_URL": "https://phil-orchestrator.vviswanathan.workers.dev"
+    "WORKER_URL": "https://phil.veredaspartners.com",
+    "PREVIEW_HOSTNAME": "veredaspartners.com"
   },
+  "routes": [
+    { "pattern": "phil.veredaspartners.com", "custom_domain": true },
+    { "pattern": "*.veredaspartners.com/*", "zone_name": "veredaspartners.com" }
+  ],
   "observability": {
     "enabled": true
   }

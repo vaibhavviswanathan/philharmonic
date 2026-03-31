@@ -1,4 +1,4 @@
-import type { Task } from "../api.js";
+import { resolvePreviewUrl, type Task } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
 
 export function TaskCard({
@@ -39,17 +39,30 @@ export function TaskCard({
           ))}
         </div>
       )}
-      {task.prUrl && (
-        <a
-          href={task.prUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="mt-2 inline-block text-xs text-blue-400 hover:underline"
-        >
-          View PR
-        </a>
-      )}
+      <div className="flex items-center gap-3 mt-2">
+        {task.prUrl && (
+          <a
+            href={task.prUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-xs text-blue-400 hover:underline"
+          >
+            View PR
+          </a>
+        )}
+        {task.previewUrl && (
+          <a
+            href={resolvePreviewUrl(task.previewUrl)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-xs text-indigo-400 hover:underline"
+          >
+            Preview
+          </a>
+        )}
+      </div>
     </div>
   );
 }

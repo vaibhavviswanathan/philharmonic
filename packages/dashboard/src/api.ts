@@ -4,11 +4,14 @@ const WS_BASE = import.meta.env.VITE_WS_URL ??
 
 // --- Types ---
 
+export type AutonomyLevel = "supervised" | "moderate" | "high" | "full";
+
 export interface Project {
   id: string;
   name: string;
   repoUrl: string;
   defaultBranch?: string;
+  autonomyLevel: AutonomyLevel;
   createdAt: string;
   updatedAt: string;
 }
@@ -22,11 +25,16 @@ export interface Task {
   branchName: string;
   subtasks: Subtask[];
   touchSet: string[];
+  planMarkdown?: string;
   prUrl?: string;
   prNumber?: number;
+  previewUrl?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;
+  blockedBy?: string;
+  dependsOn?: string[];
+  reviewCycles?: number;
 }
 
 export interface Subtask {
@@ -86,6 +94,16 @@ export async function listProjects(): Promise<Project[]> {
   return res.json();
 }
 
+export async function updateProject(id: string, updates: { name?: string; autonomyLevel?: AutonomyLevel }): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error(`Failed to update project: ${res.statusText}`);
+  return res.json();
+}
+
 export async function deleteProject(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/projects/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to delete project: ${res.statusText}`);
@@ -93,14 +111,22 @@ export async function deleteProject(id: string): Promise<void> {
 
 // --- Tasks ---
 
-export async function createTask(projectId: string, description: string): Promise<Task> {
+export async function createTask(projectId: string, description: string, backlog?: boolean, dependsOn?: string[]): Promise<Task> {
   const res = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ projectId, description }),
+    body: JSON.stringify({ projectId, description, backlog, dependsOn }),
   });
   if (!res.ok) throw new Error(`Failed to create task: ${res.statusText}`);
   return res.json();
+}
+
+export async function startTask(taskId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/start`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
 }
 
 export async function listTasks(projectId?: string): Promise<Task[]> {
@@ -119,6 +145,124 @@ export async function getTask(id: string): Promise<Task> {
 export async function cancelTask(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to cancel task: ${res.statusText}`);
+}
+
+export async function resolveTask(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${id}/resolve`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to resolve task: ${res.statusText}`);
+}
+
+export async function mergeTask(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${id}/merge`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+}
+
+export async function closeTask(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${id}/close`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+}
+
+// --- Plan Approval ---
+
+export async function approvePlan(taskId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/plan/approve`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+}
+
+export async function sendPlanFeedback(taskId: string, feedback: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/plan/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ feedback }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+}
+
+// --- Messages (Escalation / Chat) ---
+
+export interface Message {
+  sender: string;
+  message: string;
+  createdAt: string;
+}
+
+export async function getMessages(taskId: string): Promise<Message[]> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/messages`);
+  if (!res.ok) throw new Error(`Failed to get messages: ${res.statusText}`);
+  return res.json();
+}
+
+export async function sendMessage(taskId: string, message: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok) throw new Error(`Failed to send message: ${res.statusText}`);
+}
+
+// --- Preview ---
+
+export async function exposePort(taskId: string, port: number): Promise<string> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ port }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+  const data = await res.json() as { previewUrl: string };
+  return data.previewUrl;
+}
+
+/** Convert a preview URL (may be relative) to a full URL using the API origin */
+export function resolvePreviewUrl(previewUrl: string): string {
+  if (previewUrl.startsWith("http")) return previewUrl;
+  // Relative path like /preview/taskId/ — prepend API origin
+  const origin = API_BASE.replace(/\/v1$/, "");
+  return `${origin}${previewUrl}`;
+}
+
+// --- Agent Context ---
+
+export interface ContextEntry {
+  type: "tool" | "text" | "result";
+  content: string;
+}
+
+export async function getContext(taskId: string): Promise<ContextEntry[] | null> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/context`);
+  if (!res.ok) return null;
+  const data = await res.json() as { context: ContextEntry[] | null };
+  return data.context;
+}
+
+// --- Logs ---
+
+export interface LogEntry {
+  message: string;
+  level: string;
+  timestamp: string;
+}
+
+export async function getLogs(taskId: string): Promise<LogEntry[]> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/logs`);
+  if (!res.ok) return [];
+  return res.json();
 }
 
 // --- WebSocket ---

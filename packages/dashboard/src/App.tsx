@@ -20,7 +20,7 @@ export function App() {
 
   if (view.type === "settings") {
     return (
-      <div className="min-h-screen max-w-3xl mx-auto p-6 space-y-6">
+      <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
         <Header onSettings={() => {}} />
         <SettingsPanel onBack={() => setView({ type: "projects" })} />
       </div>
@@ -29,7 +29,7 @@ export function App() {
 
   if (view.type === "project") {
     return (
-      <div className="min-h-screen max-w-3xl mx-auto p-6 space-y-6">
+      <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
         <Header onSettings={() => setView({ type: "settings" })} />
         <ProjectView
           project={view.project}
@@ -40,7 +40,7 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen max-w-3xl mx-auto p-6 space-y-6">
+    <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
       <Header onSettings={() => setView({ type: "settings" })} />
 
       <NewProjectForm onCreated={refresh} />
