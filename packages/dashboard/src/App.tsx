@@ -3,8 +3,9 @@ import { listProjects, deleteProject, type Project } from "./api.js";
 import { NewProjectForm } from "./components/NewProjectForm.js";
 import { ProjectView } from "./components/ProjectView.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
+import { EditorPage } from "./pages/EditorPage.js";
 
-type View = { type: "projects" } | { type: "project"; project: Project } | { type: "settings" };
+type View = { type: "projects" } | { type: "project"; project: Project } | { type: "settings" } | { type: "editor" };
 
 const ROUTE_KEY = "phil-dashboard-route";
 
@@ -60,10 +61,14 @@ export function App() {
     }
   }, [projects]);
 
+  if (view.type === "editor") {
+    return <EditorPage onBack={() => navigate({ type: "projects" })} />;
+  }
+
   if (view.type === "settings") {
     return (
       <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
-        <Header onSettings={() => navigate({ type: "settings" })} />
+        <Header onSettings={() => navigate({ type: "settings" })} onEditor={() => navigate({ type: "editor" })} />
         <SettingsPanel onBack={() => navigate({ type: "projects" })} />
       </div>
     );
@@ -72,7 +77,7 @@ export function App() {
   if (view.type === "project") {
     return (
       <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
-        <Header onSettings={() => navigate({ type: "settings" })} />
+        <Header onSettings={() => navigate({ type: "settings" })} onEditor={() => navigate({ type: "editor" })} />
         <ProjectView
           project={view.project}
           onBack={() => { navigate({ type: "projects" }); refresh(); }}
@@ -83,7 +88,7 @@ export function App() {
 
   return (
     <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
-      <Header onSettings={() => navigate({ type: "settings" })} />
+      <Header onSettings={() => navigate({ type: "settings" })} onEditor={() => navigate({ type: "editor" })} />
 
       <NewProjectForm onCreated={refresh} />
 
@@ -127,19 +132,27 @@ export function App() {
   );
 }
 
-function Header({ onSettings }: { onSettings: () => void }) {
+function Header({ onSettings, onEditor }: { onSettings: () => void; onEditor: () => void }) {
   return (
     <header className="flex items-center justify-between">
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-bold">Phil</h1>
         <span className="text-sm text-gray-500">AI Coding Agent</span>
       </div>
-      <button
-        onClick={onSettings}
-        className="text-sm text-gray-400 hover:text-white"
-      >
-        Settings
-      </button>
+      <div className="flex items-center gap-4">
+        <button
+          onClick={onEditor}
+          className="text-sm text-gray-400 hover:text-white"
+        >
+          Editor
+        </button>
+        <button
+          onClick={onSettings}
+          className="text-sm text-gray-400 hover:text-white"
+        >
+          Settings
+        </button>
+      </div>
     </header>
   );
 }
