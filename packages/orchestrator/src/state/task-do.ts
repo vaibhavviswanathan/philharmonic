@@ -450,6 +450,39 @@ export class TaskCoordinator extends DurableObject<Env> {
       }
     }
 
+    // Phase 1.5: Unblock dependency-blocked tasks whose deps are now met
+    // These tasks were blocked after planning — move them back to "planned"
+    // so they go through the approval flow.
+    for (const taskId of pending) {
+      const task = await this.getTask(taskId);
+      if (!task || task.status !== "blocked") continue;
+      if (!task.dependsOn || task.dependsOn.length === 0) continue;
+      // Only handle tasks that have a plan (touchSet populated) — these were blocked post-planning
+      if (task.touchSet.length === 0) continue;
+
+      const depsMet = task.dependsOn.every((depId) => {
+        const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
+        return row && (row.status as string) === "success";
+      });
+      if (depsMet) {
+        await this.updateTask(taskId, { status: "planned", blockedBy: undefined });
+        await this.appendLog(taskId, "", "Dependencies resolved — plan ready for review", "info");
+
+        // Check auto-approve
+        const project = task.projectId ? await this.getProject(task.projectId) : null;
+        const autonomy = project?.autonomyLevel ?? "supervised";
+        const fileCount = task.touchSet.length;
+        const shouldAutoApprove =
+          autonomy === "full" ||
+          (autonomy === "high" && fileCount <= 10) ||
+          (autonomy === "moderate" && fileCount <= 3);
+        if (shouldAutoApprove) {
+          await this.appendLog(taskId, "", `Auto-approved (autonomy: ${autonomy}, ${fileCount} files). Queuing for execution.`, "info");
+          await this.approvePlan(taskId);
+        }
+      }
+    }
+
     // Phase 2: Dispatch approved tasks, checking for conflicts
     // Only tasks that have been explicitly approved (or unblocked) get dispatched
     // (approved already fetched at top of alarm)
@@ -698,6 +731,19 @@ export class TaskCoordinator extends DurableObject<Env> {
 
     if (inferredDeps.length > 0) {
       await this.appendLog(taskId, "", `Auto-inferred ${inferredDeps.length} dependency(ies) from overlapping files`, "info");
+    }
+
+    // If dependencies aren't met, block immediately — don't auto-approve or wait for review
+    if (allDeps.length > 0) {
+      const unmetDeps = allDeps.filter((depId) => {
+        const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
+        return !row || (row.status as string) !== "success";
+      });
+      if (unmetDeps.length > 0) {
+        await this.updateTask(taskId, { status: "blocked" });
+        await this.appendLog(taskId, "", `Blocked — waiting on ${unmetDeps.length} dependency(ies): ${unmetDeps.join(", ")}`, "info");
+        return;
+      }
     }
 
     // Check if we should auto-approve based on project autonomy level

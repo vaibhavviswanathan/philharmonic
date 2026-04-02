@@ -21,6 +21,11 @@ export function TaskCard({
       </div>
       <p className="text-sm font-medium mb-1 truncate">{task.description}</p>
       <p className="text-xs text-gray-500 truncate">{task.repoUrl}</p>
+      {task.dependsOn && task.dependsOn.length > 0 && (
+        <p className="text-xs text-orange-400 mt-1">
+          {task.status === "blocked" ? "Blocked by" : "Depends on"} {task.dependsOn.length} task{task.dependsOn.length > 1 ? "s" : ""}
+        </p>
+      )}
       {task.subtasks.length > 0 && (
         <div className="mt-2 flex gap-1">
           {task.subtasks.map((s) => (
