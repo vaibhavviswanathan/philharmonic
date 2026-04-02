@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { nanoid } from "nanoid";
-import { getSandbox, proxyToSandbox } from "@cloudflare/sandbox";
+import { getSandbox, proxyToSandbox, proxyTerminal } from "@cloudflare/sandbox";
 export { Sandbox } from "@cloudflare/sandbox";
 import {
   CreateProjectSchema,
@@ -184,6 +184,14 @@ app.get("/v1/tasks/:id/events", async (c) => {
     coordinator, "getEvents", c.req.param("id"),
   );
   return c.json(events);
+});
+
+// Terminal WebSocket — proxy PTY from the task's sandbox
+app.get("/v1/tasks/:id/terminal", async (c) => {
+  const taskId = c.req.param("id");
+  const sandboxId = `task-${taskId}`.toLowerCase();
+  const sandbox = getSandbox(c.env.Sandbox, sandboxId);
+  return proxyTerminal(sandbox, taskId, c.req.raw, { cols: 120, rows: 40 });
 });
 
 app.get("/v1/tasks/:id/context", async (c) => {

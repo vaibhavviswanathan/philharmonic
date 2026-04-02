@@ -3,6 +3,7 @@ import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTa
 import { StatusBadge } from "./StatusBadge.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { PlanReview } from "./PlanReview.js";
+import { AgentTerminal, type AgentTerminalHandle } from "./AgentTerminal.js";
 
 export function TaskDetail({
   taskId,
@@ -14,6 +15,8 @@ export function TaskDetail({
   const [task, setTask] = useState<Task | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const [outputTab, setOutputTab] = useState<"terminal" | "logs">("terminal");
+  const terminalRef = useRef<AgentTerminalHandle>(null);
 
   useEffect(() => {
     getTask(taskId).then(setTask);
@@ -248,35 +251,93 @@ export function TaskDetail({
       )}
 
       <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-        <h3 className="text-sm font-semibold mb-2">Agent Logs</h3>
-        <div className="bg-black rounded p-3 max-h-96 overflow-y-auto font-mono text-xs space-y-0.5">
-          {logs.length === 0 && (
-            <p className="text-gray-600">Waiting for agent output...</p>
-          )}
-          {logs.map((log, i) => (
-            <div
-              key={i}
-              className={`text-gray-300 ${
-                log.startsWith("[CONFLICT]")
-                  ? "text-orange-400"
-                  : log.startsWith("[REBASE]")
-                    ? "text-yellow-400"
-                    : log.startsWith("[REVIEW]")
-                      ? "text-purple-400"
-                      : log.startsWith("[FIXING]")
-                        ? "text-purple-300"
-                        : log.startsWith("[FIXED]")
-                          ? "text-green-400"
-                          : log.startsWith("[ESCALATION]")
-                            ? "text-yellow-300"
-                            : ""
-              }`}
-            >
-              {log}
-            </div>
-          ))}
-          <div ref={logsEndRef} />
+        {/* Tab switcher */}
+        <div className="flex items-center gap-1 mb-3">
+          <button
+            onClick={() => setOutputTab("terminal")}
+            className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+              outputTab === "terminal"
+                ? "bg-gray-700 text-white"
+                : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            Terminal
+          </button>
+          <button
+            onClick={() => setOutputTab("logs")}
+            className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+              outputTab === "logs"
+                ? "bg-gray-700 text-white"
+                : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            Agent Logs
+          </button>
         </div>
+
+        {outputTab === "terminal" ? (
+          <>
+            <AgentTerminal ref={terminalRef} taskId={taskId} />
+            {/* Smart command buttons — inject text into the terminal */}
+            <div className="flex flex-wrap gap-2 mt-2">
+              <button
+                onClick={() => terminalRef.current?.sendCommand("Please run the test suite and report results")}
+                className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 rounded text-xs text-gray-300 border border-gray-700"
+              >
+                Run Tests
+              </button>
+              <button
+                onClick={() => terminalRef.current?.sendCommand("Please push your changes to the branch")}
+                className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 rounded text-xs text-gray-300 border border-gray-700"
+              >
+                Push Changes
+              </button>
+              <button
+                onClick={() => terminalRef.current?.sendCommand("Please create a pull request with a concise title and brief body")}
+                className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 rounded text-xs text-gray-300 border border-gray-700"
+              >
+                Create PR
+              </button>
+              {task.prUrl && (
+                <button
+                  onClick={() => terminalRef.current?.sendCommand("Please fix the review comments on the PR and push the changes")}
+                  className="px-2.5 py-1 bg-purple-900 hover:bg-purple-800 rounded text-xs text-purple-300 border border-purple-700"
+                >
+                  Fix Reviews
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="bg-black rounded p-3 max-h-96 overflow-y-auto font-mono text-xs space-y-0.5">
+            {logs.length === 0 && (
+              <p className="text-gray-600">Waiting for agent output...</p>
+            )}
+            {logs.map((log, i) => (
+              <div
+                key={i}
+                className={`text-gray-300 ${
+                  log.startsWith("[CONFLICT]")
+                    ? "text-orange-400"
+                    : log.startsWith("[REBASE]")
+                      ? "text-yellow-400"
+                      : log.startsWith("[REVIEW]")
+                        ? "text-purple-400"
+                        : log.startsWith("[FIXING]")
+                          ? "text-purple-300"
+                          : log.startsWith("[FIXED]")
+                            ? "text-green-400"
+                            : log.startsWith("[ESCALATION]")
+                              ? "text-yellow-300"
+                              : ""
+                }`}
+              >
+                {log}
+              </div>
+            ))}
+            <div ref={logsEndRef} />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -905,7 +905,9 @@ export class TaskCoordinator extends DurableObject<Env> {
 
       const { sandbox } = await sandboxManager.create(payload);
 
-      const result = await sandboxManager.runAgent(sandbox, payload, async (msg) => {
+      // Use interactive Claude Code — the user can watch and interact
+      // via the terminal WebSocket at /v1/tasks/:id/terminal
+      await sandboxManager.runInteractiveAgent(sandbox, payload, async (msg) => {
         await this.appendLog(taskId, `task-${taskId}`, msg, "info");
       }, async (partial) => {
         // Persist PR URL and preview URL immediately as they're discovered
@@ -917,7 +919,6 @@ export class TaskCoordinator extends DurableObject<Env> {
           if (prMatch) updates.prNumber = parseInt(prMatch[1], 10);
         }
         if (partial.previewUrl) {
-          // Preview URL is now a real URL from sandbox.exposePort()
           updates.previewUrl = partial.previewUrl;
         }
         if (Object.keys(updates).length > 0) {
@@ -925,32 +926,13 @@ export class TaskCoordinator extends DurableObject<Env> {
         }
       });
 
-      await this.updateTask(taskId, { status: "reviewing", prUrl: result.prUrl, previewUrl: result.previewUrl });
+      // Check what the agent accomplished
+      const updatedTask = await this.getTask(taskId);
+      await this.updateTask(taskId, { status: "reviewing" });
 
-      // Store agent context for post-hoc inspection
-      if (result.agentContext) {
-        await this.storeContext(taskId, result.agentContext);
-      }
-
-      await this.appendLog(taskId, "", "PR created — sandbox kept alive for review fixes", "info");
-      if (result.previewUrl) {
-        await this.appendLog(taskId, "", `Preview available at ${result.previewUrl}`, "info");
-      }
-
-      // If no preview was exposed and the project looks like a web app, ask the agent to fix it
-      if (!result.previewUrl && payload.repoContext.projectType === "node") {
-        const hasWebServer = await this.detectWebServer(sandbox, taskId);
-        if (hasWebServer) {
-          await this.appendLog(taskId, "", "Detected web server but no preview — requesting agent to start it", "info");
-          await this.addReviewComment(taskId, {
-            id: `auto-preview-${Date.now()}`,
-            prNumber: task.prNumber ?? 0,
-            author: "phil-orchestrator",
-            body: "Please start the dev/web server in the background on port 8080 (port 3000 is reserved and cannot be used). Run it with & or use a process manager so it keeps running after you finish. Do NOT use port 3000.",
-            createdAt: new Date().toISOString(),
-          });
-          await this.enqueueReviewFix(taskId);
-        }
+      await this.appendLog(taskId, "", "Agent session complete — sandbox kept alive for interaction", "info");
+      if (updatedTask?.previewUrl) {
+        await this.appendLog(taskId, "", `Preview available at ${updatedTask.previewUrl}`, "info");
       }
 
       // Track that this sandbox is alive for review fixes

@@ -1,7 +1,7 @@
 import { getSandbox, type Sandbox as SandboxInstance } from "@cloudflare/sandbox";
 import type { DispatchPayload, Sandbox } from "@phil/shared";
 import type { Env } from "../env.js";
-import { runAgentLoop } from "./agent.js";
+import { runAgentLoop, startInteractiveAgent } from "./agent.js";
 
 export class SandboxManager {
   constructor(private env: Env) {}
@@ -50,6 +50,19 @@ export class SandboxManager {
     onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
   ): Promise<{ prUrl?: string; previewUrl?: string; agentContext?: string }> {
     return runAgentLoop(sandbox, payload, this.env, onLog, onResult);
+  }
+
+  /**
+   * Start Claude Code interactively in the sandbox.
+   * The user can watch and interact via the terminal WebSocket.
+   */
+  async runInteractiveAgent(
+    sandbox: SandboxInstance,
+    payload: DispatchPayload,
+    onLog: (message: string) => Promise<void>,
+    onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
+  ): Promise<void> {
+    return startInteractiveAgent(sandbox, payload, this.env, onLog, onResult);
   }
 
   async destroy(taskId: string): Promise<void> {
