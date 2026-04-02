@@ -1,9 +1,11 @@
 import { useEffect, useState, useRef } from "react";
 import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTask, exposePort, subscribeToEvents, type Task, type PhilEvent, type ContextEntry } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { ChatPanel } from "./ChatPanel.js";
 import { PlanReview } from "./PlanReview.js";
 import { AgentTerminal, type AgentTerminalHandle } from "./AgentTerminal.js";
+
+/** Statuses where a sandbox exists and the terminal can connect */
+const SANDBOX_ACTIVE_STATUSES = ["running", "reviewing", "fixing"];
 
 export function TaskDetail({
   taskId,
@@ -88,6 +90,7 @@ export function TaskDetail({
   if (!task) return <div className="p-4">Loading...</div>;
 
   const isReviewPhase = task.status === "reviewing" || task.status === "fixing";
+  const hasSandbox = SANDBOX_ACTIVE_STATUSES.includes(task.status);
 
   return (
     <div className="space-y-4">
@@ -174,13 +177,10 @@ export function TaskDetail({
             <button
               onClick={async () => {
                 try {
-                  // Always re-expose to get a fresh token (sandbox may have recycled)
                   const freshUrl = await exposePort(task.id, 8080);
                   window.open(freshUrl, "_blank");
-                  // Update task with new URL
                   getTask(taskId).then(setTask);
                 } catch {
-                  // Fallback to stored URL if expose fails
                   window.open(task.previewUrl!, "_blank");
                 }
               }}
@@ -197,7 +197,7 @@ export function TaskDetail({
         )}
         {isReviewPhase && (
           <p className="mt-2 text-sm text-purple-400">
-            Sandbox is alive — add PR review comments or send messages below. The agent will automatically fix them.
+            Sandbox is alive — use the terminal below to interact with the agent directly.
           </p>
         )}
         {task.status === "backlog" && (
@@ -240,33 +240,31 @@ export function TaskDetail({
         </div>
       )}
 
-      {/* Chat panel — show for reviewing/fixing tasks, or any task with a PR */}
-      {(isReviewPhase || task.prUrl) && (
-        <ChatPanel taskId={taskId} />
-      )}
-
       {/* Context Inspector — show for completed/reviewing tasks */}
       {["reviewing", "fixing", "success", "failed", "closed"].includes(task.status) && (
         <ContextInspector taskId={taskId} />
       )}
 
+      {/* Terminal + Logs panel */}
       <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-        {/* Tab switcher */}
+        {/* Tab switcher — only show terminal tab when sandbox is active */}
         <div className="flex items-center gap-1 mb-3">
-          <button
-            onClick={() => setOutputTab("terminal")}
-            className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
-              outputTab === "terminal"
-                ? "bg-gray-700 text-white"
-                : "text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            Terminal
-          </button>
+          {hasSandbox && (
+            <button
+              onClick={() => setOutputTab("terminal")}
+              className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+                outputTab === "terminal"
+                  ? "bg-gray-700 text-white"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              Terminal
+            </button>
+          )}
           <button
             onClick={() => setOutputTab("logs")}
             className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
-              outputTab === "logs"
+              outputTab === "logs" || (!hasSandbox && outputTab === "terminal")
                 ? "bg-gray-700 text-white"
                 : "text-gray-400 hover:text-gray-200"
             }`}
@@ -275,7 +273,7 @@ export function TaskDetail({
           </button>
         </div>
 
-        {outputTab === "terminal" ? (
+        {hasSandbox && outputTab === "terminal" ? (
           <>
             <AgentTerminal ref={terminalRef} taskId={taskId} />
             {/* Smart command buttons — inject text into the terminal */}
@@ -397,4 +395,3 @@ function ContextInspector({ taskId }: { taskId: string }) {
     </div>
   );
 }
-

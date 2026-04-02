@@ -268,9 +268,9 @@ export async function getLogs(taskId: string): Promise<LogEntry[]> {
 // --- Terminal WebSocket ---
 
 /** Build the WebSocket URL for the task's interactive terminal */
-export function getTerminalWsUrl(taskId: string, origin: string): string {
-  // origin comes from SandboxAddon as wss://host or ws://host
-  return `${origin}/v1/tasks/${taskId}/terminal`;
+export function getTerminalWsUrl(taskId: string): string {
+  // Use WS_BASE which points to the orchestrator, not the dashboard origin
+  return `${WS_BASE}/tasks/${taskId}/terminal`;
 }
 
 // --- WebSocket ---

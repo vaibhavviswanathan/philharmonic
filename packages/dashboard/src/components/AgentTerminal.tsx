@@ -48,7 +48,7 @@ export const AgentTerminal = forwardRef<
     terminal.loadAddon(fitAddon);
 
     const sandboxAddon = new SandboxAddon({
-      getWebSocketUrl: ({ origin }) => getTerminalWsUrl(taskId, origin),
+      getWebSocketUrl: () => getTerminalWsUrl(taskId),
       reconnect: true,
       onStateChange: (state, error) => {
         setConnState(state);
