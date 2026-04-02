@@ -3,9 +3,49 @@ import type { DispatchPayload } from "@phil/shared";
 import type { Env } from "../env.js";
 
 /**
- * Build the prompt for Claude Code from the dispatch payload.
+ * Build the CLAUDE.md content that gives Claude Code its task context.
+ * This replaces the old -p prompt + --append-system-prompt approach.
+ * Claude Code reads CLAUDE.md natively at startup.
  */
-function buildPrompt(payload: DispatchPayload): string {
+export function buildClaudeMd(
+  payload: DispatchPayload,
+  existingClaudeMd?: string,
+): string {
+  const subtaskList = payload.subtasks
+    .map((s, i) => `${i + 1}. [${s.id}] ${s.description}\n   Files: ${s.fileTargets.join(", ") || "TBD"}`)
+    .join("\n");
+
+  const philSection = `
+# Phil Task Instructions
+
+## Task
+${payload.subtasks.length > 0 ? payload.subtasks.map((s) => s.description).join("; ") : "See subtasks below"}
+
+## Branch: ${payload.branchName}
+
+## Subtasks (complete in order)
+${subtaskList}
+
+## Rules
+- Port 3000 is RESERVED — use port 8080 for any servers.
+- After completing all subtasks: git add, git commit, git push, then gh pr create.
+- Keep PR titles concise and PR bodies brief.
+- Do NOT run install commands unless the task specifically requires adding dependencies.
+- Never force-push unless rebasing.
+- If the project can serve a web UI, start the dev server in the background on port 8080.
+`;
+
+  if (existingClaudeMd && existingClaudeMd.trim()) {
+    return existingClaudeMd + "\n\n" + philSection;
+  }
+  return philSection;
+}
+
+/**
+ * Build the prompt for Claude Code from the dispatch payload.
+ * Used as the initial message sent to the interactive Claude Code session.
+ */
+export function buildPrompt(payload: DispatchPayload): string {
   const subtaskList = payload.subtasks
     .map((s, i) => `${i + 1}. [${s.id}] ${s.description}\n   Files: ${s.fileTargets.join(", ") || "TBD"}`)
     .join("\n");
@@ -35,7 +75,7 @@ Begin working on the task now.`;
 /**
  * Build the append-system-prompt with Phil-specific rules.
  */
-function buildSystemAppend(): string {
+export function buildSystemAppend(): string {
   return `## Phil Agent Rules
 - You are running inside a sandboxed container as Phil's coding agent.
 - Port 3000 is RESERVED by the system — configure any servers to use port 8080.
@@ -49,7 +89,7 @@ function buildSystemAppend(): string {
  * Parse a stream-json NDJSON line for logging purposes.
  * Returns a human-readable log message or null if not interesting.
  */
-function parseStreamEvent(line: string): string | null {
+export function parseStreamEvent(line: string): string | null {
   try {
     const event = JSON.parse(line);
     if (event.type === "stream_event") {
@@ -74,8 +114,111 @@ function parseStreamEvent(line: string): string | null {
 }
 
 /**
- * Runs Claude Code CLI inside the sandbox container.
+ * Starts Claude Code interactively inside the sandbox.
+ * Writes CLAUDE.md with task context, then launches `claude --dangerously-skip-permissions`.
+ * Returns immediately — the process runs in the background.
+ * The dashboard connects to the terminal via proxyTerminal() WebSocket.
+ */
+export async function startInteractiveAgent(
+  sandbox: SandboxInstance,
+  payload: DispatchPayload,
+  env: Env,
+  onLog: (message: string) => Promise<void>,
+  onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
+): Promise<void> {
+  const token = env.GITHUB_TOKEN ?? "";
+
+  // Set up git credentials
+  if (token) {
+    await sandbox.exec(
+      `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=${token}"; }; f'`,
+    );
+  }
+
+  // Read existing CLAUDE.md if the repo has one
+  const existingClaudeMd = await sandbox.exec("cat /workspace/CLAUDE.md 2>/dev/null || true");
+  const claudeMdContent = buildClaudeMd(payload, existingClaudeMd.stdout.trim() || undefined);
+  await sandbox.writeFile("/workspace/CLAUDE.md", claudeMdContent);
+
+  await onLog("Starting interactive Claude Code agent...");
+
+  // Start Claude Code interactively with --dangerously-skip-permissions
+  // The sandbox is already isolated, so this is safe.
+  // Using startProcess() so the orchestrator can monitor output.
+  const process = await sandbox.startProcess(
+    "claude --dangerously-skip-permissions --verbose",
+    {
+      cwd: "/workspace",
+      env: {
+        ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+        GH_TOKEN: token,
+        HOME: "/root",
+      },
+      onOutput: (_stream, data) => {
+        // Monitor output for PR URLs
+        const prMatch = data.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/);
+        if (prMatch && onResult) {
+          onResult({ prUrl: prMatch[0] }).catch(() => {});
+          onLog(`PR created: ${prMatch[0]}`).catch(() => {});
+        }
+      },
+      onExit: async (code) => {
+        await onLog(`Claude Code exited with code ${code}`);
+      },
+    },
+  );
+
+  await onLog(`Claude Code started (pid: ${process.pid ?? "unknown"})`);
+
+  // Wait for the agent to finish or timeout
+  const maxWallClock = 12 * 60 * 1000; // 12 minutes
+  try {
+    const result = await process.waitForExit(maxWallClock);
+    if (result.exitCode !== 0) {
+      await onLog(`Claude Code exited with non-zero code: ${result.exitCode}`);
+    }
+  } catch {
+    await onLog("Claude Code hit wall-clock limit — killing process");
+    await process.kill().catch(() => {});
+  }
+
+  // Post-processing: extract PR URL if not already found
+  let prUrl: string | undefined;
+  try {
+    const prResult = await sandbox.exec(
+      `GH_TOKEN=${token} gh pr list --json url --state open --head ${payload.branchName} -q '.[0].url' 2>/dev/null || true`,
+      { cwd: "/workspace" },
+    );
+    if (prResult.success && prResult.stdout.trim().startsWith("https://")) {
+      prUrl = prResult.stdout.trim();
+      await onLog(`PR: ${prUrl}`);
+      if (onResult) await onResult({ prUrl }).catch(() => {});
+    }
+  } catch {
+    // No PR found
+  }
+
+  // Post-processing: detect or start preview server on port 8080
+  let previewUrl: string | undefined;
+  const hostname = env.PREVIEW_HOSTNAME ?? new URL(env.WORKER_URL ?? "https://localhost").hostname;
+  try {
+    const portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
+    if (portCheck.success && portCheck.stdout.includes("LISTENING")) {
+      await onLog("Preview server detected on port 8080 — exposing...");
+      const exposed = await sandbox.exposePort(8080, { hostname });
+      previewUrl = exposed.url;
+      await onLog(`Preview URL: ${previewUrl}`);
+      if (onResult) await onResult({ prUrl, previewUrl }).catch(() => {});
+    }
+  } catch (err) {
+    await onLog(`Preview expose failed: ${err}`);
+  }
+}
+
+/**
+ * Legacy batch mode: Runs Claude Code CLI inside the sandbox container.
  * Streams output via NDJSON polling for real-time dashboard logs.
+ * Kept for fallback — new tasks use startInteractiveAgent().
  */
 export async function runAgentLoop(
   sandbox: SandboxInstance,

@@ -119,3 +119,118 @@ describe("areDependenciesMet", () => {
     expect(areDependenciesMet(["t1", "t2"], (id) => statuses[id] ?? null)).toBe(true);
   });
 });
+
+/**
+ * Extract and test the touch-set overlap inference logic from planSingleTask.
+ */
+interface TaskRow {
+  id: string;
+  touchSet: string[];
+  status: string;
+  createdAt: string;
+}
+
+function inferDependencies(
+  taskId: string,
+  touchSet: string[],
+  createdAt: string,
+  otherTasks: TaskRow[],
+): string[] {
+  if (touchSet.length === 0) return [];
+
+  const terminalStatuses = ["success", "failed", "cancelled", "closed"];
+  const touchSetLookup = new Set(touchSet);
+  const deps: string[] = [];
+
+  for (const other of otherTasks) {
+    if (other.id === taskId) continue;
+    if (terminalStatuses.includes(other.status)) continue;
+    if (other.touchSet.length === 0) continue;
+
+    const hasOverlap = other.touchSet.some((f) => touchSetLookup.has(f));
+    if (!hasOverlap) continue;
+
+    // Only depend on tasks created before this one
+    if (other.createdAt < createdAt) {
+      deps.push(other.id);
+    }
+  }
+
+  return deps;
+}
+
+describe("inferDependencies", () => {
+  it("returns empty for no touch set", () => {
+    expect(inferDependencies("t2", [], "2026-01-02", [
+      { id: "t1", touchSet: ["src/a.ts"], status: "planned", createdAt: "2026-01-01" },
+    ])).toEqual([]);
+  });
+
+  it("returns empty when no other tasks exist", () => {
+    expect(inferDependencies("t1", ["src/a.ts"], "2026-01-01", [])).toEqual([]);
+  });
+
+  it("detects overlapping touch sets", () => {
+    const result = inferDependencies("t2", ["src/a.ts", "src/b.ts"], "2026-01-02", [
+      { id: "t1", touchSet: ["src/a.ts", "src/c.ts"], status: "planned", createdAt: "2026-01-01" },
+    ]);
+    expect(result).toEqual(["t1"]);
+  });
+
+  it("ignores tasks with no overlap", () => {
+    const result = inferDependencies("t2", ["src/a.ts"], "2026-01-02", [
+      { id: "t1", touchSet: ["src/b.ts", "src/c.ts"], status: "planned", createdAt: "2026-01-01" },
+    ]);
+    expect(result).toEqual([]);
+  });
+
+  it("ignores terminal tasks (success, failed, cancelled, closed)", () => {
+    const otherTasks: TaskRow[] = [
+      { id: "t1", touchSet: ["src/a.ts"], status: "success", createdAt: "2026-01-01" },
+      { id: "t2", touchSet: ["src/a.ts"], status: "failed", createdAt: "2026-01-01" },
+      { id: "t3", touchSet: ["src/a.ts"], status: "cancelled", createdAt: "2026-01-01" },
+      { id: "t4", touchSet: ["src/a.ts"], status: "closed", createdAt: "2026-01-01" },
+    ];
+    const result = inferDependencies("t5", ["src/a.ts"], "2026-01-02", otherTasks);
+    expect(result).toEqual([]);
+  });
+
+  it("only depends on tasks created BEFORE this one (no circular deps)", () => {
+    const result = inferDependencies("t1", ["src/a.ts"], "2026-01-01", [
+      { id: "t2", touchSet: ["src/a.ts"], status: "planned", createdAt: "2026-01-02" },
+    ]);
+    expect(result).toEqual([]);
+  });
+
+  it("handles multiple overlapping tasks", () => {
+    const result = inferDependencies("t3", ["src/a.ts", "src/b.ts"], "2026-01-03", [
+      { id: "t1", touchSet: ["src/a.ts"], status: "running", createdAt: "2026-01-01" },
+      { id: "t2", touchSet: ["src/b.ts"], status: "planned", createdAt: "2026-01-02" },
+    ]);
+    expect(result).toEqual(["t1", "t2"]);
+  });
+
+  it("includes running and reviewing tasks as dependencies", () => {
+    const otherTasks: TaskRow[] = [
+      { id: "t1", touchSet: ["src/a.ts"], status: "running", createdAt: "2026-01-01" },
+      { id: "t2", touchSet: ["src/a.ts"], status: "reviewing", createdAt: "2026-01-01" },
+      { id: "t3", touchSet: ["src/a.ts"], status: "blocked", createdAt: "2026-01-01" },
+    ];
+    const result = inferDependencies("t4", ["src/a.ts"], "2026-01-02", otherTasks);
+    expect(result).toEqual(["t1", "t2", "t3"]);
+  });
+
+  it("skips self", () => {
+    const result = inferDependencies("t1", ["src/a.ts"], "2026-01-01", [
+      { id: "t1", touchSet: ["src/a.ts"], status: "planned", createdAt: "2026-01-01" },
+    ]);
+    expect(result).toEqual([]);
+  });
+
+  it("skips tasks with empty touch sets", () => {
+    const result = inferDependencies("t2", ["src/a.ts"], "2026-01-02", [
+      { id: "t1", touchSet: [], status: "planned", createdAt: "2026-01-01" },
+    ]);
+    expect(result).toEqual([]);
+  });
+});

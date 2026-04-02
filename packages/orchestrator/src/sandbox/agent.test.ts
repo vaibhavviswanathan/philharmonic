@@ -1,82 +1,17 @@
 import { describe, it, expect } from "vitest";
-
-// We test the pure functions from agent.ts.
-// Since buildPrompt, buildSystemAppend, and parseStreamEvent are not exported,
-// we extract and test the logic inline.
-
-// --- buildPrompt logic ---
-
-function buildPrompt(payload: {
-  branchName: string;
-  repoContext: { repoUrl: string; projectType: string };
-  subtasks: Array<{ id: string; description: string; fileTargets: string[] }>;
-}): string {
-  const subtaskList = payload.subtasks
-    .map((s, i) => `${i + 1}. [${s.id}] ${s.description}\n   Files: ${s.fileTargets.join(", ") || "TBD"}`)
-    .join("\n");
-
-  return `You are working on a coding task in a git repository.
-
-## Task context
-- Branch: ${payload.branchName}
-- Repository: ${payload.repoContext.repoUrl}
-- Project type: ${payload.repoContext.projectType}
-
-## Subtasks to complete (in order)
-${subtaskList}
-
-## Instructions
-1. Read the relevant files to understand the project structure
-2. Implement each subtask
-3. Commit your changes with clear messages
-4. Push to the branch: ${payload.branchName}
-5. Open a PR using \`gh pr create\`
-6. **Preview**: If the project can serve a web UI, start the dev server in the background and note the port.
-   - **IMPORTANT: Port 3000 is RESERVED and CANNOT be used.** Use port 8080 instead.
-
-Begin working on the task now.`;
-}
-
-function buildSystemAppend(): string {
-  return `## Phil Agent Rules
-- You are running inside a sandboxed container as Phil's coding agent.
-- Port 3000 is RESERVED by the system — configure any servers to use port 8080.
-- After completing all subtasks, you MUST: git add, git commit, git push, then gh pr create.
-- Do NOT run install commands unless the task specifically requires adding dependencies.
-- Keep PR titles concise and PR bodies brief.
-- Never force-push unless rebasing.`;
-}
-
-function parseStreamEvent(line: string): string | null {
-  try {
-    const event = JSON.parse(line);
-    if (event.type === "stream_event") {
-      const e = event.event;
-      if (e?.type === "content_block_start" && e?.content_block?.type === "tool_use") {
-        return `Tool: ${e.content_block.name}`;
-      }
-      if (e?.type === "tool_use") {
-        const input = JSON.stringify(e.input ?? {}).slice(0, 120);
-        return `Tool: ${e.name} ${input}`;
-      }
-    }
-    if (event.type === "result") {
-      return `Claude Code finished`;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
+import { buildPrompt, buildSystemAppend, parseStreamEvent, buildClaudeMd } from "./agent.js";
 
 describe("buildPrompt", () => {
   const payload = {
+    taskId: "t1",
     branchName: "phil/add-auth",
-    repoContext: { repoUrl: "https://github.com/user/repo", projectType: "node" },
+    repoContext: { repoUrl: "https://github.com/user/repo", projectType: "node", defaultBranch: "main", structure: [] },
     subtasks: [
-      { id: "s1", description: "Create auth middleware", fileTargets: ["src/auth.ts"] },
-      { id: "s2", description: "Add login route", fileTargets: ["src/routes.ts", "src/auth.ts"] },
+      { id: "s1", description: "Create auth middleware", fileTargets: ["src/auth.ts"], status: "pending" as const, dependencies: [] },
+      { id: "s2", description: "Add login route", fileTargets: ["src/routes.ts", "src/auth.ts"], status: "pending" as const, dependencies: [] },
     ],
+    touchSet: [],
+    callbackUrl: "",
   };
 
   it("includes branch name", () => {
@@ -100,7 +35,7 @@ describe("buildPrompt", () => {
   });
 
   it("shows TBD for empty file targets", () => {
-    const p = { ...payload, subtasks: [{ id: "s1", description: "Explore", fileTargets: [] }] };
+    const p = { ...payload, subtasks: [{ id: "s1", description: "Explore", fileTargets: [], status: "pending" as const, dependencies: [] }] };
     expect(buildPrompt(p)).toContain("Files: TBD");
   });
 
@@ -116,6 +51,58 @@ describe("buildSystemAppend", () => {
     expect(append).toContain("port 8080");
     expect(append).toContain("git push");
     expect(append).toContain("gh pr create");
+  });
+});
+
+describe("buildClaudeMd", () => {
+  const payload = {
+    taskId: "t1",
+    branchName: "phil/add-auth",
+    repoContext: { repoUrl: "https://github.com/user/repo", projectType: "node", defaultBranch: "main", structure: [] },
+    subtasks: [
+      { id: "s1", description: "Create auth middleware", fileTargets: ["src/auth.ts"], status: "pending" as const, dependencies: [] },
+    ],
+    touchSet: [],
+    callbackUrl: "",
+  };
+
+  it("includes task instructions header", () => {
+    expect(buildClaudeMd(payload)).toContain("# Phil Task Instructions");
+  });
+
+  it("includes branch name", () => {
+    expect(buildClaudeMd(payload)).toContain("phil/add-auth");
+  });
+
+  it("includes subtask listing", () => {
+    expect(buildClaudeMd(payload)).toContain("[s1] Create auth middleware");
+  });
+
+  it("includes port 8080 rule", () => {
+    expect(buildClaudeMd(payload)).toContain("port 8080");
+  });
+
+  it("includes PR creation rule", () => {
+    expect(buildClaudeMd(payload)).toContain("gh pr create");
+  });
+
+  it("prepends existing CLAUDE.md content", () => {
+    const existing = "# Project Setup\nUse pnpm for package management.";
+    const result = buildClaudeMd(payload, existing);
+    expect(result).toContain("# Project Setup");
+    expect(result).toContain("# Phil Task Instructions");
+    // Existing content should come first
+    expect(result.indexOf("# Project Setup")).toBeLessThan(result.indexOf("# Phil Task Instructions"));
+  });
+
+  it("works without existing CLAUDE.md", () => {
+    const result = buildClaudeMd(payload);
+    expect(result).toContain("# Phil Task Instructions");
+  });
+
+  it("works with empty existing CLAUDE.md", () => {
+    const result = buildClaudeMd(payload, "");
+    expect(result).toContain("# Phil Task Instructions");
   });
 });
 

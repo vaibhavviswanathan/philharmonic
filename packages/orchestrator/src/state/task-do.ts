@@ -256,17 +256,31 @@ export class TaskCoordinator extends DurableObject<Env> {
   }
 
   async deleteProject(id: string): Promise<void> {
-    // Delete all tasks and their subtasks/logs for this project
+    // Delete all tasks and their subtasks/logs/events for this project
     const tasks = this.ctx.storage.sql.exec(
       `SELECT id FROM tasks WHERE project_id = ?`, id
     ).toArray();
-    for (const t of tasks) {
-      const taskId = t.id as string;
-      this.ctx.storage.sql.exec(`DELETE FROM subtasks WHERE task_id = ?`, taskId);
-      this.ctx.storage.sql.exec(`DELETE FROM logs WHERE task_id = ?`, taskId);
+    const taskIds = tasks.map((t) => t.id as string);
+    for (const taskId of taskIds) {
+      try { this.ctx.storage.sql.exec(`DELETE FROM subtasks WHERE task_id = ?`, taskId); } catch { /* ignore */ }
+      try { this.ctx.storage.sql.exec(`DELETE FROM events WHERE task_id = ?`, taskId); } catch { /* ignore */ }
+      try { this.ctx.storage.sql.exec(`DELETE FROM review_comments WHERE task_id = ?`, taskId); } catch { /* ignore */ }
+      try { this.ctx.storage.sql.exec(`DELETE FROM escalations WHERE task_id = ?`, taskId); } catch { /* ignore */ }
     }
     this.ctx.storage.sql.exec(`DELETE FROM tasks WHERE project_id = ?`, id);
     this.ctx.storage.sql.exec(`DELETE FROM projects WHERE id = ?`, id);
+
+    // Clean up DO storage keys referencing deleted tasks
+    const cleanList = async (key: string) => {
+      const list = await this.ctx.storage.get<string[]>(key) ?? [];
+      const filtered = list.filter((tid) => !taskIds.includes(tid));
+      await this.ctx.storage.put(key, filtered);
+    };
+    await cleanList("pending_tasks");
+    await cleanList("running_tasks");
+    await cleanList("approved_tasks");
+    await cleanList("watching_tasks");
+    await cleanList("pending_review_fixes");
   }
 
   // --- Task CRUD ---
@@ -334,6 +348,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     if (updates.reviewCycles !== undefined) { sets.push(`review_cycles = ?`); params.push(updates.reviewCycles); }
     if (updates.previewUrl !== undefined) { sets.push(`preview_url = ?`); params.push(updates.previewUrl ?? null); }
     if (updates.planMarkdown !== undefined) { sets.push(`plan_markdown = ?`); params.push(updates.planMarkdown); }
+    if (updates.dependsOn !== undefined) { sets.push(`depends_on = ?`); params.push(JSON.stringify(updates.dependsOn)); }
 
     params.push(id);
     this.ctx.storage.sql.exec(
@@ -431,6 +446,39 @@ export class TaskCoordinator extends DurableObject<Env> {
           console.error(`Planning failed for task ${taskId}:`, err);
           await this.updateTask(taskId, { status: "failed", error: `Planning error: ${err}` });
           await this.appendLog(taskId, "", `Planning failed: ${err}`, "error");
+        }
+      }
+    }
+
+    // Phase 1.5: Unblock dependency-blocked tasks whose deps are now met
+    // These tasks were blocked after planning — move them back to "planned"
+    // so they go through the approval flow.
+    for (const taskId of pending) {
+      const task = await this.getTask(taskId);
+      if (!task || task.status !== "blocked") continue;
+      if (!task.dependsOn || task.dependsOn.length === 0) continue;
+      // Only handle tasks that have a plan (touchSet populated) — these were blocked post-planning
+      if (task.touchSet.length === 0) continue;
+
+      const depsMet = task.dependsOn.every((depId) => {
+        const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
+        return row && (row.status as string) === "success";
+      });
+      if (depsMet) {
+        await this.updateTask(taskId, { status: "planned", blockedBy: undefined });
+        await this.appendLog(taskId, "", "Dependencies resolved — plan ready for review", "info");
+
+        // Check auto-approve
+        const project = task.projectId ? await this.getProject(task.projectId) : null;
+        const autonomy = project?.autonomyLevel ?? "supervised";
+        const fileCount = task.touchSet.length;
+        const shouldAutoApprove =
+          autonomy === "full" ||
+          (autonomy === "high" && fileCount <= 10) ||
+          (autonomy === "moderate" && fileCount <= 3);
+        if (shouldAutoApprove) {
+          await this.appendLog(taskId, "", `Auto-approved (autonomy: ${autonomy}, ${fileCount} files). Queuing for execution.`, "info");
+          await this.approvePlan(taskId);
         }
       }
     }
@@ -662,13 +710,41 @@ export class TaskCoordinator extends DurableObject<Env> {
 
     const result = await planTask(taskId, task.repoUrl, task.description, env);
 
+    // Auto-infer dependencies: if this task's touch set overlaps with any
+    // earlier non-terminal task in the same project, depend on it.
+    const inferredDeps = await this.inferDependencies(
+      taskId,
+      task.projectId,
+      result.payload.touchSet,
+      task.createdAt,
+    );
+    const allDeps = [...new Set([...(task.dependsOn ?? []), ...inferredDeps])];
+
     await this.updateTask(taskId, {
       status: "planned",
       branchName: result.payload.branchName,
       subtasks: result.payload.subtasks,
       touchSet: result.payload.touchSet,
       planMarkdown: result.planMarkdown,
+      dependsOn: allDeps,
     });
+
+    if (inferredDeps.length > 0) {
+      await this.appendLog(taskId, "", `Auto-inferred ${inferredDeps.length} dependency(ies) from overlapping files`, "info");
+    }
+
+    // If dependencies aren't met, block immediately — don't auto-approve or wait for review
+    if (allDeps.length > 0) {
+      const unmetDeps = allDeps.filter((depId) => {
+        const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
+        return !row || (row.status as string) !== "success";
+      });
+      if (unmetDeps.length > 0) {
+        await this.updateTask(taskId, { status: "blocked" });
+        await this.appendLog(taskId, "", `Blocked — waiting on ${unmetDeps.length} dependency(ies): ${unmetDeps.join(", ")}`, "info");
+        return;
+      }
+    }
 
     // Check if we should auto-approve based on project autonomy level
     const project = task.projectId ? await this.getProject(task.projectId) : null;
@@ -685,6 +761,54 @@ export class TaskCoordinator extends DurableObject<Env> {
     } else {
       await this.appendLog(taskId, "", `Plan ready for review: ${result.payload.subtasks.length} subtasks. Waiting for approval.`, "info");
     }
+  }
+
+  /**
+   * Infer dependencies by checking touch-set overlap with earlier non-terminal tasks.
+   * Returns task IDs that this task should depend on.
+   */
+  private async inferDependencies(
+    taskId: string,
+    projectId: string,
+    touchSet: string[],
+    createdAt: string,
+  ): Promise<string[]> {
+    if (touchSet.length === 0) return [];
+
+    const terminalStatuses = ["success", "failed", "cancelled", "closed"];
+    const rows = this.ctx.storage.sql.exec(
+      `SELECT id, touch_set, created_at FROM tasks WHERE project_id = ? AND id != ?`,
+      projectId,
+      taskId,
+    ).toArray();
+
+    const deps: string[] = [];
+    const touchSetLookup = new Set(touchSet);
+
+    for (const row of rows) {
+      const status = (this.ctx.storage.sql.exec(
+        `SELECT status FROM tasks WHERE id = ?`, row.id as string,
+      ).toArray()[0]?.status as string) ?? "";
+
+      if (terminalStatuses.includes(status)) continue;
+
+      const otherTouchSet: string[] = (() => {
+        try { return JSON.parse((row.touch_set as string) || "[]"); }
+        catch { return []; }
+      })();
+      if (otherTouchSet.length === 0) continue;
+
+      // Check overlap
+      const hasOverlap = otherTouchSet.some((f) => touchSetLookup.has(f));
+      if (!hasOverlap) continue;
+
+      // Only depend on tasks created before this one (avoid circular deps)
+      if ((row.created_at as string) < createdAt) {
+        deps.push(row.id as string);
+      }
+    }
+
+    return deps;
   }
 
   /**
@@ -781,7 +905,9 @@ export class TaskCoordinator extends DurableObject<Env> {
 
       const { sandbox } = await sandboxManager.create(payload);
 
-      const result = await sandboxManager.runAgent(sandbox, payload, async (msg) => {
+      // Use interactive Claude Code — the user can watch and interact
+      // via the terminal WebSocket at /v1/tasks/:id/terminal
+      await sandboxManager.runInteractiveAgent(sandbox, payload, async (msg) => {
         await this.appendLog(taskId, `task-${taskId}`, msg, "info");
       }, async (partial) => {
         // Persist PR URL and preview URL immediately as they're discovered
@@ -793,7 +919,6 @@ export class TaskCoordinator extends DurableObject<Env> {
           if (prMatch) updates.prNumber = parseInt(prMatch[1], 10);
         }
         if (partial.previewUrl) {
-          // Preview URL is now a real URL from sandbox.exposePort()
           updates.previewUrl = partial.previewUrl;
         }
         if (Object.keys(updates).length > 0) {
@@ -801,32 +926,13 @@ export class TaskCoordinator extends DurableObject<Env> {
         }
       });
 
-      await this.updateTask(taskId, { status: "reviewing", prUrl: result.prUrl, previewUrl: result.previewUrl });
+      // Check what the agent accomplished
+      const updatedTask = await this.getTask(taskId);
+      await this.updateTask(taskId, { status: "reviewing" });
 
-      // Store agent context for post-hoc inspection
-      if (result.agentContext) {
-        await this.storeContext(taskId, result.agentContext);
-      }
-
-      await this.appendLog(taskId, "", "PR created — sandbox kept alive for review fixes", "info");
-      if (result.previewUrl) {
-        await this.appendLog(taskId, "", `Preview available at ${result.previewUrl}`, "info");
-      }
-
-      // If no preview was exposed and the project looks like a web app, ask the agent to fix it
-      if (!result.previewUrl && payload.repoContext.projectType === "node") {
-        const hasWebServer = await this.detectWebServer(sandbox, taskId);
-        if (hasWebServer) {
-          await this.appendLog(taskId, "", "Detected web server but no preview — requesting agent to start it", "info");
-          await this.addReviewComment(taskId, {
-            id: `auto-preview-${Date.now()}`,
-            prNumber: task.prNumber ?? 0,
-            author: "phil-orchestrator",
-            body: "Please start the dev/web server in the background on port 8080 (port 3000 is reserved and cannot be used). Run it with & or use a process manager so it keeps running after you finish. Do NOT use port 3000.",
-            createdAt: new Date().toISOString(),
-          });
-          await this.enqueueReviewFix(taskId);
-        }
+      await this.appendLog(taskId, "", "Agent session complete — sandbox kept alive for interaction", "info");
+      if (updatedTask?.previewUrl) {
+        await this.appendLog(taskId, "", `Preview available at ${updatedTask.previewUrl}`, "info");
       }
 
       // Track that this sandbox is alive for review fixes

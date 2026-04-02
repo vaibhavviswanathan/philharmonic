@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { nanoid } from "nanoid";
-import { getSandbox, proxyToSandbox } from "@cloudflare/sandbox";
+import { getSandbox, proxyToSandbox, proxyTerminal } from "@cloudflare/sandbox";
 export { Sandbox } from "@cloudflare/sandbox";
 import {
   CreateProjectSchema,
@@ -106,10 +106,15 @@ app.put("/v1/projects/:id", async (c) => {
 
 app.delete("/v1/projects/:id", async (c) => {
   const coordinator = getCoordinator(c.env);
-  const project = await doRpc<Project | null>(coordinator, "getProject", c.req.param("id"));
-  if (!project) return c.json({ error: "Project not found" }, 404);
-  await doRpc(coordinator, "deleteProject", c.req.param("id"));
-  return c.json({ ok: true });
+  try {
+    const project = await doRpc<Project | null>(coordinator, "getProject", c.req.param("id"));
+    if (!project) return c.json({ error: "Project not found" }, 404);
+    await doRpc(coordinator, "deleteProject", c.req.param("id"));
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("Delete project error:", err);
+    return c.json({ error: String(err) }, 500);
+  }
 });
 
 // --- Tasks API ---
@@ -179,6 +184,14 @@ app.get("/v1/tasks/:id/events", async (c) => {
     coordinator, "getEvents", c.req.param("id"),
   );
   return c.json(events);
+});
+
+// Terminal WebSocket — proxy PTY from the task's sandbox
+app.get("/v1/tasks/:id/terminal", async (c) => {
+  const taskId = c.req.param("id");
+  const sandboxId = `task-${taskId}`.toLowerCase();
+  const sandbox = getSandbox(c.env.Sandbox, sandboxId);
+  return proxyTerminal(sandbox, taskId, c.req.raw, { cols: 120, rows: 40 });
 });
 
 app.get("/v1/tasks/:id/context", async (c) => {
