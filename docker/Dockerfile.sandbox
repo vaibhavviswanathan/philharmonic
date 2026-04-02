@@ -2,7 +2,7 @@ FROM docker.io/cloudflare/sandbox:0.7.20
 
 # Add tools needed by the coding agent
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 && \
+    apt-get install -y --no-install-recommends python3 tmux && \
     rm -rf /var/lib/apt/lists/*
 
 # Install gh CLI
@@ -17,8 +17,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install pnpm and Claude Code CLI
 RUN npm install -g pnpm @anthropic-ai/claude-code
 
-# Workspace for cloned repos
-RUN mkdir -p /workspace
+# Create non-root user (Claude Code refuses --dangerously-skip-permissions as root)
+RUN useradd -m -s /bin/bash phil && \
+    mkdir -p /workspace && \
+    chown phil:phil /workspace
 
 # Required for local dev port exposure
 EXPOSE 8080

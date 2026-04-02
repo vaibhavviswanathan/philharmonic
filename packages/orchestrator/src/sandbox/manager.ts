@@ -1,7 +1,7 @@
 import { getSandbox, type Sandbox as SandboxInstance } from "@cloudflare/sandbox";
 import type { DispatchPayload, Sandbox } from "@phil/shared";
 import type { Env } from "../env.js";
-import { runAgentLoop, startInteractiveAgent } from "./agent.js";
+import { startInteractiveAgent } from "./agent.js";
 
 export class SandboxManager {
   constructor(private env: Env) {}
@@ -12,11 +12,11 @@ export class SandboxManager {
       keepAlive: true,
     });
 
-    // Configure git inside the sandbox
+    // Configure git inside the sandbox (root for initial clone)
     await sandbox.exec('git config --global user.name "Phil Agent"');
     await sandbox.exec('git config --global user.email "phil@agent.local"');
 
-    // Recover workspace if sandbox was recycled since planning phase
+    // Recover workspace if sandbox was recycled
     const wsCheck = await sandbox.exec("ls /workspace/.git 2>/dev/null && echo 'ok' || echo 'empty'");
     if (wsCheck.stdout.trim() === "empty") {
       const token = this.env.GITHUB_TOKEN ?? "";
@@ -24,8 +24,11 @@ export class SandboxManager {
       await sandbox.exec(`git clone ${authedUrl} /workspace 2>&1`);
     }
 
-    // Create feature branch (repo already cloned during planning phase)
+    // Create feature branch
     await sandbox.exec(`git checkout -b ${payload.branchName}`, { cwd: "/workspace" });
+
+    // Ensure phil user owns workspace (Claude Code runs as phil, not root)
+    await sandbox.exec("chown -R phil:phil /workspace");
 
     const meta: Sandbox = {
       id: sandboxId,
@@ -38,18 +41,6 @@ export class SandboxManager {
     };
 
     return { sandbox, meta };
-  }
-
-  /**
-   * Run the agent loop from the Worker, executing tools via Sandbox SDK.
-   */
-  async runAgent(
-    sandbox: SandboxInstance,
-    payload: DispatchPayload,
-    onLog: (message: string) => Promise<void>,
-    onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
-  ): Promise<{ prUrl?: string; previewUrl?: string; agentContext?: string }> {
-    return runAgentLoop(sandbox, payload, this.env, onLog, onResult);
   }
 
   /**

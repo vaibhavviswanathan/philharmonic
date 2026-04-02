@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTask, exposePort, subscribeToEvents, type Task, type PhilEvent, type ContextEntry } from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { PlanReview } from "./PlanReview.js";
 import { AgentTerminal, type AgentTerminalHandle } from "./AgentTerminal.js";
 
 /** Statuses where a sandbox exists and the terminal can connect */
@@ -219,11 +218,6 @@ export function TaskDetail({
           <p className="mt-2 text-sm text-red-400">{task.error}</p>
         )}
       </div>
-
-      {/* Plan review — show when task is planned or being revised */}
-      {(task.status === "planned" || (task.status === "planning" && task.planMarkdown)) && (
-        <PlanReview task={task} onUpdate={() => getTask(taskId).then(setTask)} />
-      )}
 
       {/* Subtasks — show during execution (running, reviewing, etc.) */}
       {task.subtasks.length > 0 && task.status !== "planned" && task.status !== "planning" && (

@@ -114,17 +114,21 @@ export function parseStreamEvent(line: string): string | null {
 }
 
 /**
- * Starts Claude Code interactively inside the sandbox.
- * Writes CLAUDE.md with task context, then launches `claude --dangerously-skip-permissions`.
- * Returns immediately — the process runs in the background.
- * The dashboard connects to the terminal via proxyTerminal() WebSocket.
+ * Configures a sandbox so that when the user connects via proxyTerminal(),
+ * Claude Code auto-launches in the PTY shell.
+ *
+ * We write env vars + auto-start logic to /root/.bashrc so the terminal
+ * session runs Claude Code directly. The user sees Claude working in real-time
+ * and can type to it.
+ *
+ * Returns immediately — Claude Code starts when the terminal PTY connects.
  */
 export async function startInteractiveAgent(
   sandbox: SandboxInstance,
   payload: DispatchPayload,
   env: Env,
   onLog: (message: string) => Promise<void>,
-  onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
+  _onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
 ): Promise<void> {
   const token = env.GITHUB_TOKEN ?? "";
 
@@ -140,305 +144,67 @@ export async function startInteractiveAgent(
   const claudeMdContent = buildClaudeMd(payload, existingClaudeMd.stdout.trim() || undefined);
   await sandbox.writeFile("/workspace/CLAUDE.md", claudeMdContent);
 
-  await onLog("Starting interactive Claude Code agent...");
+  await onLog("Sandbox ready — writing startup script...");
 
-  // Start Claude Code interactively with --dangerously-skip-permissions
-  // The sandbox is already isolated, so this is safe.
-  // Using startProcess() so the orchestrator can monitor output.
-  const process = await sandbox.startProcess(
-    "claude --dangerously-skip-permissions --verbose",
-    {
-      cwd: "/workspace",
-      env: {
-        ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
-        GH_TOKEN: token,
-        HOME: "/root",
-      },
-      onOutput: (_stream, data) => {
-        // Monitor output for PR URLs
-        const prMatch = data.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/);
-        if (prMatch && onResult) {
-          onResult({ prUrl: prMatch[0] }).catch(() => {});
-          onLog(`PR created: ${prMatch[0]}`).catch(() => {});
-        }
-      },
-      onExit: async (code) => {
-        await onLog(`Claude Code exited with code ${code}`);
-      },
-    },
-  );
+  // Create phil user at runtime (handles both old and new container images)
+  await sandbox.exec("id phil &>/dev/null || useradd -m -s /bin/bash phil");
+  await sandbox.exec("chown -R phil:phil /workspace");
 
-  await onLog(`Claude Code started (pid: ${process.pid ?? "unknown"})`);
-
-  // Wait for the agent to finish or timeout
-  const maxWallClock = 12 * 60 * 1000; // 12 minutes
-  try {
-    const result = await process.waitForExit(maxWallClock);
-    if (result.exitCode !== 0) {
-      await onLog(`Claude Code exited with non-zero code: ${result.exitCode}`);
-    }
-  } catch {
-    await onLog("Claude Code hit wall-clock limit — killing process");
-    await process.kill().catch(() => {});
-  }
-
-  // Post-processing: extract PR URL if not already found
-  let prUrl: string | undefined;
-  try {
-    const prResult = await sandbox.exec(
-      `GH_TOKEN=${token} gh pr list --json url --state open --head ${payload.branchName} -q '.[0].url' 2>/dev/null || true`,
-      { cwd: "/workspace" },
-    );
-    if (prResult.success && prResult.stdout.trim().startsWith("https://")) {
-      prUrl = prResult.stdout.trim();
-      await onLog(`PR: ${prUrl}`);
-      if (onResult) await onResult({ prUrl }).catch(() => {});
-    }
-  } catch {
-    // No PR found
-  }
-
-  // Post-processing: detect or start preview server on port 8080
-  let previewUrl: string | undefined;
-  const hostname = env.PREVIEW_HOSTNAME ?? new URL(env.WORKER_URL ?? "https://localhost").hostname;
-  try {
-    const portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-    if (portCheck.success && portCheck.stdout.includes("LISTENING")) {
-      await onLog("Preview server detected on port 8080 — exposing...");
-      const exposed = await sandbox.exposePort(8080, { hostname });
-      previewUrl = exposed.url;
-      await onLog(`Preview URL: ${previewUrl}`);
-      if (onResult) await onResult({ prUrl, previewUrl }).catch(() => {});
-    }
-  } catch (err) {
-    await onLog(`Preview expose failed: ${err}`);
-  }
-}
-
-/**
- * Legacy batch mode: Runs Claude Code CLI inside the sandbox container.
- * Streams output via NDJSON polling for real-time dashboard logs.
- * Kept for fallback — new tasks use startInteractiveAgent().
- */
-export async function runAgentLoop(
-  sandbox: SandboxInstance,
-  payload: DispatchPayload,
-  env: Env,
-  onLog: (message: string) => Promise<void>,
-  onResult?: (result: { prUrl?: string; previewUrl?: string }) => Promise<void>,
-): Promise<{ prUrl?: string; previewUrl?: string; agentContext?: string }> {
-  const prompt = buildPrompt(payload);
-  const systemAppend = buildSystemAppend();
-
-  // Write prompt to file to avoid shell escaping issues
-  await sandbox.writeFile("/tmp/phil-prompt.txt", prompt);
-  await sandbox.writeFile("/tmp/phil-system-append.txt", systemAppend);
-
-  // Set up git credentials for push
-  const token = env.GITHUB_TOKEN ?? "";
+  // Set up git config for the phil user
+  await sandbox.exec('runuser -u phil -- git config --global user.name "Phil Agent"');
+  await sandbox.exec('runuser -u phil -- git config --global user.email "phil@agent.local"');
   if (token) {
     await sandbox.exec(
-      `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=${token}"; }; f'`,
+      `runuser -u phil -- git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=${token}"; }; f'`,
     );
   }
 
-  await onLog("Starting Claude Code agent...");
+  // Pre-create Claude Code config to skip first-run onboarding
+  // The onboarding flag lives in ~/.claude.json (NOT ~/.claude/state.json)
+  await sandbox.exec("mkdir -p /home/phil/.claude");
+  await sandbox.writeFile("/home/phil/.claude.json", JSON.stringify({ hasCompletedOnboarding: true }));
+  await sandbox.exec("chown phil:phil /home/phil/.claude.json");
+  await sandbox.exec("chown -R phil:phil /home/phil/.claude");
 
-  // Clean up any previous output
-  await sandbox.exec("rm -f /tmp/claude-output.jsonl /tmp/claude-exit-code");
+  // Write startup script to /workspace (guaranteed shared between exec and terminal)
+  // Uses tmux so the session persists across terminal reconnects.
+  // Socket in /workspace so it's visible from both exec() and proxyTerminal() contexts.
+  // IMPORTANT: onboarding skip config MUST be created inside this script (not via
+  // sandbox.writeFile) because the terminal PTY has a separate filesystem view.
+  const startScript = `#!/bin/bash
+SOCK=/workspace/.tmux.sock
 
-  // Start Claude Code in background
-  const claudeCmd = [
-    'claude',
-    '-p', '"$(cat /tmp/phil-prompt.txt)"',
-    '--append-system-prompt-file', '/tmp/phil-system-append.txt',
-    '--allowedTools', '"Bash,Read,Write,Edit,Glob,Grep"',
-    '--output-format', 'stream-json',
-    '--max-turns', '200',
-    '--verbose',
-  ].join(' ');
+# If tmux session already exists, just attach
+if tmux -S "$SOCK" has-session -t claude 2>/dev/null; then
+  exec tmux -S "$SOCK" attach -t claude
+fi
 
-  await sandbox.exec(
-    `bash -c '${claudeCmd} > /tmp/claude-output.jsonl 2>&1; echo $? > /tmp/claude-exit-code' &`,
-    {
-      cwd: "/workspace",
-      env: {
-        ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
-        GH_TOKEN: token,
-        HOME: "/root",
-      },
-    },
-  );
+# First run — set up user and config
+id phil &>/dev/null || useradd -m -s /bin/bash phil
+chown -R phil:phil /workspace /home/phil 2>/dev/null
 
-  // Poll for output
-  let lastLine = 0;
-  const maxWallClock = 10 * 60 * 1000; // 10 minutes
-  const startTime = Date.now();
-  const pollInterval = 3000; // 3 seconds
+# Create Claude Code onboarding skip config (must run in PTY context)
+mkdir -p /home/phil/.claude
+echo '{"hasCompletedOnboarding":true}' > /home/phil/.claude.json
+chown -R phil:phil /home/phil/.claude /home/phil/.claude.json
 
-  while (Date.now() - startTime < maxWallClock) {
-    await new Promise((r) => setTimeout(r, pollInterval));
+# Start Claude Code inside a tmux session
+exec tmux -S "$SOCK" new-session -s claude "runuser -u phil -- bash -c '
+  export ANTHROPIC_API_KEY=\\"${env.ANTHROPIC_API_KEY}\\"
+  export GH_TOKEN=\\"${token}\\"
+  export GITHUB_TOKEN=\\"${token}\\"
+  export HOME=\\"/home/phil\\"
+  export DISABLE_INTERACTIVITY=1
+  cd /workspace
+  exec claude --dangerously-skip-permissions --verbose
+'"
+`;
+  await sandbox.writeFile("/workspace/.phil-start.sh", startScript);
+  await sandbox.exec("chmod +x /workspace/.phil-start.sh");
 
-    // Read new lines from output file
-    try {
-      const tail = await sandbox.exec(
-        `tail -n +${lastLine + 1} /tmp/claude-output.jsonl 2>/dev/null || true`,
-      );
-      if (tail.success && tail.stdout.trim()) {
-        const lines = tail.stdout.split("\n").filter(Boolean);
-        for (const line of lines) {
-          lastLine++;
-          const logMsg = parseStreamEvent(line);
-          if (logMsg) {
-            await onLog(logMsg);
-          }
-        }
-      }
-    } catch {
-      // File might not exist yet
-    }
-
-    // Check if process finished
-    try {
-      const exitCheck = await sandbox.exec("cat /tmp/claude-exit-code 2>/dev/null || echo 'running'");
-      if (exitCheck.success && exitCheck.stdout.trim() !== "running") {
-        const exitCode = parseInt(exitCheck.stdout.trim(), 10);
-        await onLog(`Claude Code exited with code ${exitCode}`);
-        break;
-      }
-    } catch {
-      // Still running
-    }
-  }
-
-  // Check for timeout
-  if (Date.now() - startTime >= maxWallClock) {
-    await onLog("Claude Code hit 10min wall-clock limit — stopping");
-    await sandbox.exec("pkill -f 'claude.*-p' 2>/dev/null || true");
-  }
-
-  // Capture agent context (the full NDJSON output) for post-hoc inspection
-  let agentContext: string | undefined;
-  try {
-    const ctxResult = await sandbox.exec("cat /tmp/claude-output.jsonl 2>/dev/null || true");
-    if (ctxResult.success && ctxResult.stdout.trim()) {
-      // Extract tool calls and text responses for a structured summary
-      const lines = ctxResult.stdout.split("\n").filter(Boolean);
-      const summary: Array<{ type: string; content: string }> = [];
-      for (const line of lines) {
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "stream_event") {
-            const e = event.event;
-            if (e?.type === "tool_use") {
-              summary.push({ type: "tool", content: `${e.name}: ${JSON.stringify(e.input ?? {}).slice(0, 500)}` });
-            } else if (e?.type === "text" && e?.text) {
-              summary.push({ type: "text", content: e.text.slice(0, 1000) });
-            }
-          } else if (event.type === "result") {
-            summary.push({ type: "result", content: JSON.stringify(event).slice(0, 2000) });
-          }
-        } catch { /* skip non-JSON lines */ }
-      }
-      agentContext = JSON.stringify(summary);
-    }
-  } catch { /* best effort */ }
-
-  // Post-processing: extract PR URL
-  let prUrl: string | undefined;
-  try {
-    const prResult = await sandbox.exec(
-      `GH_TOKEN=${token} gh pr list --json url --state open --head ${payload.branchName} -q '.[0].url' 2>/dev/null || true`,
-      { cwd: "/workspace" },
-    );
-    if (prResult.success && prResult.stdout.trim().startsWith("https://")) {
-      prUrl = prResult.stdout.trim();
-      await onLog(`PR created: ${prUrl}`);
-      if (onResult) await onResult({ prUrl }).catch(() => {});
-    }
-  } catch {
-    // No PR found
-  }
-
-  // Post-processing: detect or start preview server on port 8080
-  console.log("[agent] Post-processing: checking for preview server");
-  let previewUrl: string | undefined;
-  const hostname = env.PREVIEW_HOSTNAME ?? new URL(env.WORKER_URL ?? "https://localhost").hostname;
-  console.log(`[agent] Using preview hostname: ${hostname}`);
-  try {
-    let portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-    console.log(`[agent] Port check result: ${portCheck.stdout}`);
-
-    // If no server running, try to start one automatically
-    if (!portCheck.stdout.includes("LISTENING")) {
-      await onLog("No server on port 8080 — attempting to start one...");
-
-      // Strategy 1: Look for a pre-built dist/ directory with index.html — serve statically (fast)
-      const findDist = await sandbox.exec(
-        `find /workspace -maxdepth 4 -path '*/dist/index.html' -not -path '*/node_modules/*' 2>/dev/null | head -1 || true`,
-      );
-      if (findDist.success && findDist.stdout.trim()) {
-        const distDir = findDist.stdout.trim().replace(/\/index\.html$/, "");
-        await onLog(`Found built assets at ${distDir} — serving statically`);
-        await sandbox.exec(
-          `bash -c 'npx -y serve ${distDir} -l 8080 > /tmp/dev-server.log 2>&1 &'`,
-          { env: { HOME: "/root" } },
-        );
-        await new Promise((r) => setTimeout(r, 3000));
-        portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-      }
-
-      // Strategy 2: Find a frontend package and start its dev server
-      if (!portCheck.stdout.includes("LISTENING")) {
-        let serverDir = "/workspace";
-        const findFrontend = await sandbox.exec(
-          `find /workspace -maxdepth 3 -name 'vite.config.*' -o -name 'next.config.*' 2>/dev/null | grep -v node_modules | head -1 || true`,
-        );
-        if (findFrontend.success && findFrontend.stdout.trim()) {
-          serverDir = findFrontend.stdout.trim().replace(/\/[^/]+$/, "");
-          console.log(`[agent] Found frontend package at: ${serverDir}`);
-        }
-
-        const pkgCheck = await sandbox.exec(`cat ${serverDir}/package.json 2>/dev/null || true`);
-        if (pkgCheck.success && pkgCheck.stdout.includes("{")) {
-          await onLog(`Installing dependencies in ${serverDir}...`);
-          const hasPnpm = await sandbox.exec(`ls /workspace/pnpm-lock.yaml 2>/dev/null && echo 'yes' || echo 'no'`);
-          const installCmd = hasPnpm.stdout.includes("yes")
-            ? `cd /workspace && pnpm install --no-frozen-lockfile 2>&1`
-            : `cd ${serverDir} && npm install --no-audit --no-fund 2>&1`;
-          await sandbox.exec(installCmd, { cwd: serverDir });
-
-          const startCmd = pkgCheck.stdout.includes('"dev"')
-            ? "npm run dev -- --port 8080 --host 0.0.0.0"
-            : pkgCheck.stdout.includes('"start"')
-              ? "PORT=8080 npm start"
-              : `npx -y serve ${serverDir} -l 8080`;
-          await onLog(`Starting server in ${serverDir}: ${startCmd}`);
-          await sandbox.exec(
-            `bash -c 'cd ${serverDir} && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
-            { env: { PORT: "8080", HOME: "/root" } },
-          );
-          await new Promise((r) => setTimeout(r, 8000));
-          portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-          if (!portCheck.stdout.includes("LISTENING")) {
-            const serverLog = await sandbox.exec("tail -20 /tmp/dev-server.log 2>/dev/null || true");
-            await onLog(`Server failed to start. Log: ${serverLog.stdout.slice(0, 300)}`);
-          }
-        }
-      }
-    }
-
-    if (portCheck.success && portCheck.stdout.includes("LISTENING")) {
-      await onLog("Preview server detected on port 8080 — exposing...");
-      const exposed = await sandbox.exposePort(8080, { hostname });
-      previewUrl = exposed.url;
-      await onLog(`Preview URL: ${previewUrl}`);
-      if (onResult) await onResult({ prUrl, previewUrl }).catch(() => {});
-    }
-  } catch (err) {
-    console.error(`[agent] Preview expose error:`, err);
-    await onLog(`Preview expose failed: ${err}`);
-  }
-
-  return { prUrl, previewUrl, agentContext };
+  // Verify the file exists
+  const check = await sandbox.exec("ls -la /workspace/.phil-start.sh");
+  await onLog(`Startup script written: ${check.stdout.trim()}`);
+  await onLog("Claude Code will start when terminal connects.");
 }
+

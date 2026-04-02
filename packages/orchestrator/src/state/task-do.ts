@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Task, TaskStatus, Subtask, Project, PhilEvent, DispatchPayload } from "@phil/shared";
 import type { Env } from "../env.js";
-import { planTask, revisePlan } from "../planner/planner.js";
 import { SandboxManager } from "../sandbox/manager.js";
 
 export class TaskCoordinator extends DurableObject<Env> {
@@ -278,9 +277,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     };
     await cleanList("pending_tasks");
     await cleanList("running_tasks");
-    await cleanList("approved_tasks");
     await cleanList("watching_tasks");
-    await cleanList("pending_review_fixes");
   }
 
   // --- Task CRUD ---
@@ -396,13 +393,11 @@ export class TaskCoordinator extends DurableObject<Env> {
     this.ensureReady();
     let pending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
     const running = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
-    const pendingReviewFixes = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
-    const approved = await this.ctx.storage.get<string[]>("approved_tasks") ?? [];
 
-    // Self-healing: find orphaned queued/planned/blocked tasks not in any list
-    const trackedSet = new Set([...pending, ...running, ...approved]);
+    // Self-healing: find orphaned queued/blocked tasks not in any list
+    const trackedSet = new Set([...pending, ...running]);
     const activeRows = this.ctx.storage.sql.exec(
-      `SELECT id FROM tasks WHERE status IN ('queued', 'planned', 'blocked')`,
+      `SELECT id FROM tasks WHERE status IN ('queued', 'blocked')`,
     ).toArray();
     const orphaned = activeRows.filter((r) => !trackedSet.has(r.id as string));
     if (orphaned.length > 0) {
@@ -414,106 +409,41 @@ export class TaskCoordinator extends DurableObject<Env> {
       await this.ctx.storage.put("pending_tasks", pending);
     }
 
-    if (pending.length === 0 && running.length === 0 && pendingReviewFixes.length === 0 && approved.length === 0) return;
-
-    // Phase 1: Plan any queued tasks that haven't been planned yet
-    const needsPlanning: string[] = [];
-    for (const taskId of pending) {
-      const task = await this.getTask(taskId);
-      if (!task || task.status === "cancelled") continue;
-      if (task.status === "queued") {
-        needsPlanning.push(taskId);
-      }
-    }
+    if (pending.length === 0 && running.length === 0) return;
 
     const secrets = await this.resolveSecrets();
-    if (needsPlanning.length > 0) {
-      if (!secrets.anthropicApiKey) {
-        for (const id of needsPlanning) {
-          await this.updateTask(id, { status: "failed", error: "ANTHROPIC_API_KEY not configured. Go to Settings to add it." });
-        }
-        await this.ctx.storage.put("pending_tasks", pending.filter((id) => !needsPlanning.includes(id)));
-        return;
-      }
 
-      const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
-
-      // Plan tasks sequentially (each takes ~10s, fast enough)
-      for (const taskId of needsPlanning) {
-        try {
-          await this.planSingleTask(taskId, resolvedEnv);
-        } catch (err) {
-          console.error(`Planning failed for task ${taskId}:`, err);
-          await this.updateTask(taskId, { status: "failed", error: `Planning error: ${err}` });
-          await this.appendLog(taskId, "", `Planning failed: ${err}`, "error");
-        }
-      }
-    }
-
-    // Phase 1.5: Unblock dependency-blocked tasks whose deps are now met
-    // These tasks were blocked after planning — move them back to "planned"
-    // so they go through the approval flow.
+    // Unblock dependency-blocked tasks whose deps are now met
     for (const taskId of pending) {
       const task = await this.getTask(taskId);
       if (!task || task.status !== "blocked") continue;
       if (!task.dependsOn || task.dependsOn.length === 0) continue;
-      // Only handle tasks that have a plan (touchSet populated) — these were blocked post-planning
-      if (task.touchSet.length === 0) continue;
 
       const depsMet = task.dependsOn.every((depId) => {
         const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
         return row && (row.status as string) === "success";
       });
       if (depsMet) {
-        await this.updateTask(taskId, { status: "planned", blockedBy: undefined });
-        await this.appendLog(taskId, "", "Dependencies resolved — plan ready for review", "info");
-
-        // Check auto-approve
-        const project = task.projectId ? await this.getProject(task.projectId) : null;
-        const autonomy = project?.autonomyLevel ?? "supervised";
-        const fileCount = task.touchSet.length;
-        const shouldAutoApprove =
-          autonomy === "full" ||
-          (autonomy === "high" && fileCount <= 10) ||
-          (autonomy === "moderate" && fileCount <= 3);
-        if (shouldAutoApprove) {
-          await this.appendLog(taskId, "", `Auto-approved (autonomy: ${autonomy}, ${fileCount} files). Queuing for execution.`, "info");
-          await this.approvePlan(taskId);
-        }
+        await this.updateTask(taskId, { status: "queued", blockedBy: undefined });
+        await this.appendLog(taskId, "", "Dependencies resolved — ready to run", "info");
       }
     }
 
-    // Phase 2: Dispatch approved tasks, checking for conflicts
-    // Only tasks that have been explicitly approved (or unblocked) get dispatched
-    // (approved already fetched at top of alarm)
-    const updatedPending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+    // Dispatch queued tasks directly — Claude Code handles everything
     const toRun: string[] = [];
     const stillPending: string[] = [];
 
-    // Merge approved tasks into the dispatch candidates
-    const dispatchCandidates = [...new Set([...approved, ...updatedPending.filter((id) => {
-      // Only blocked tasks can auto-dispatch from pending (they were already approved before being blocked)
-      const t = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, id).toArray()[0];
-      return t && (t.status as string) === "blocked";
-    })])];
-
-    // Clean approved list — they're being processed now
-    await this.ctx.storage.put("approved_tasks", []);
-
-    // Keep pending tasks that are still waiting (planned but not approved, or queued)
-    for (const taskId of updatedPending) {
+    for (const taskId of pending) {
       const task = await this.getTask(taskId);
       if (!task || task.status === "cancelled" || task.status === "failed") continue;
-      if (!dispatchCandidates.includes(taskId)) {
+      if (task.status === "blocked") {
         stillPending.push(taskId);
         continue;
       }
-    }
-
-    for (const taskId of dispatchCandidates) {
-      const task = await this.getTask(taskId);
-      if (!task || task.status === "cancelled" || task.status === "failed") continue;
-      if (task.status !== "planned" && task.status !== "blocked") continue;
+      if (task.status !== "queued") {
+        stillPending.push(taskId);
+        continue;
+      }
 
       // DAG check: all dependsOn tasks must be "success" before dispatching
       if (task.dependsOn && task.dependsOn.length > 0) {
@@ -522,14 +452,7 @@ export class TaskCoordinator extends DurableObject<Env> {
           return row && (row.status as string) === "success";
         });
         if (!depsMet) {
-          if (task.status !== "blocked") {
-            const pendingDeps = task.dependsOn.filter((depId) => {
-              const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
-              return !row || (row.status as string) !== "success";
-            });
-            await this.updateTask(taskId, { status: "blocked" });
-            await this.appendLog(taskId, "", `Waiting on dependencies: ${pendingDeps.join(", ")}`, "info");
-          }
+          await this.updateTask(taskId, { status: "blocked" });
           stillPending.push(taskId);
           continue;
         }
@@ -540,41 +463,20 @@ export class TaskCoordinator extends DurableObject<Env> {
         continue;
       }
 
-      // Check for touch-set conflicts with running + about-to-run tasks
-      const conflict = await this.detectConflict(taskId, task.touchSet, [...running, ...toRun]);
-      if (conflict) {
-        if (task.status !== "blocked" || task.blockedBy !== conflict.blockingTaskId) {
-          await this.updateTask(taskId, { status: "blocked", blockedBy: conflict.blockingTaskId });
-          await this.appendLog(taskId, "", `Blocked by task ${conflict.blockingTaskId} (overlapping files: ${conflict.overlappingFiles.join(", ")})`, "warn");
-          this.broadcast({
-            type: "conflict_detected",
-            taskId,
-            timestamp: new Date().toISOString(),
-            data: { blockedTaskId: taskId, blockingTaskId: conflict.blockingTaskId, overlappingFiles: conflict.overlappingFiles },
-          });
-        }
-        stillPending.push(taskId);
-      } else {
-        // Clear blocked state if it was previously blocked
-        if (task.status === "blocked") {
-          this.broadcast({
-            type: "conflict_resolved",
-            taskId,
-            timestamp: new Date().toISOString(),
-            data: { blockedTaskId: taskId, blockingTaskId: task.blockedBy ?? "", overlappingFiles: [] },
-          });
-        }
-        toRun.push(taskId);
-      }
+      toRun.push(taskId);
     }
 
     await this.ctx.storage.put("pending_tasks", stillPending);
     running.push(...toRun);
     await this.ctx.storage.put("running_tasks", running);
 
-    // Phase 3: Execute non-conflicting tasks in parallel
+    // Execute tasks — boot sandbox + Claude Code for each
     if (toRun.length > 0) {
-      if (!secrets.githubToken) {
+      if (!secrets.anthropicApiKey) {
+        for (const id of toRun) {
+          await this.updateTask(id, { status: "failed", error: "ANTHROPIC_API_KEY not configured. Go to Settings to add it." });
+        }
+      } else if (!secrets.githubToken) {
         for (const id of toRun) {
           await this.updateTask(id, { status: "failed", error: "GITHUB_TOKEN not configured. Go to Settings to add it." });
         }
@@ -582,7 +484,7 @@ export class TaskCoordinator extends DurableObject<Env> {
         const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
 
         const results = await Promise.allSettled(
-          toRun.map((taskId) => this.executePlannedTask(taskId, resolvedEnv)),
+          toRun.map((taskId) => this.executeTask(taskId, resolvedEnv)),
         );
 
         for (let i = 0; i < results.length; i++) {
@@ -597,37 +499,29 @@ export class TaskCoordinator extends DurableObject<Env> {
         }
       }
 
-      // Remove completed tasks from running set + unblock waiting tasks
+      // Remove completed tasks from running set
       const currentRunning = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
-      const nowDone = currentRunning.filter((id) => toRun.includes(id));
       const stillRunning = currentRunning.filter((id) => !toRun.includes(id));
       await this.ctx.storage.put("running_tasks", stillRunning);
 
       // Check if any blocked tasks can now proceed
-      if (nowDone.length > 0) {
-        const currentPending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
-        if (currentPending.length > 0) {
-          await this.ctx.storage.setAlarm(Date.now());
-        }
+      const currentPending = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
+      if (currentPending.length > 0) {
+        await this.ctx.storage.setAlarm(Date.now());
       }
     }
-
-    // Process any pending review fixes
-    await this.processReviewFixes();
 
     // Cleanup stale sandboxes periodically
     await this.cleanupStaleTasks();
 
-    // Reschedule if there are still pending tasks or review fixes
+    // Reschedule if there are still pending tasks
     const remaining = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
-    const pendingReviews = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
-    if (remaining.length > 0 || pendingReviews.length > 0) {
+    if (remaining.length > 0) {
       const currentAlarm = await this.ctx.storage.getAlarm();
       if (!currentAlarm) {
         await this.ctx.storage.setAlarm(Date.now() + 1000);
       }
     } else {
-      // Even with no active work, schedule a cleanup check every 5 minutes
       const currentAlarm = await this.ctx.storage.getAlarm();
       if (!currentAlarm) {
         await this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000);
@@ -699,184 +593,19 @@ export class TaskCoordinator extends DurableObject<Env> {
     };
   }
 
-  // --- Task Execution Phases ---
-
-  private async planSingleTask(taskId: string, env: Env): Promise<void> {
-    const task = await this.getTask(taskId);
-    if (!task || task.status === "cancelled") return;
-
-    await this.updateTask(taskId, { status: "planning" });
-    await this.appendLog(taskId, "", "Starting planning phase...", "info");
-
-    const result = await planTask(taskId, task.repoUrl, task.description, env);
-
-    // Auto-infer dependencies: if this task's touch set overlaps with any
-    // earlier non-terminal task in the same project, depend on it.
-    const inferredDeps = await this.inferDependencies(
-      taskId,
-      task.projectId,
-      result.payload.touchSet,
-      task.createdAt,
-    );
-    const allDeps = [...new Set([...(task.dependsOn ?? []), ...inferredDeps])];
-
-    await this.updateTask(taskId, {
-      status: "planned",
-      branchName: result.payload.branchName,
-      subtasks: result.payload.subtasks,
-      touchSet: result.payload.touchSet,
-      planMarkdown: result.planMarkdown,
-      dependsOn: allDeps,
-    });
-
-    if (inferredDeps.length > 0) {
-      await this.appendLog(taskId, "", `Auto-inferred ${inferredDeps.length} dependency(ies) from overlapping files`, "info");
-    }
-
-    // If dependencies aren't met, block immediately — don't auto-approve or wait for review
-    if (allDeps.length > 0) {
-      const unmetDeps = allDeps.filter((depId) => {
-        const row = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, depId).toArray()[0];
-        return !row || (row.status as string) !== "success";
-      });
-      if (unmetDeps.length > 0) {
-        await this.updateTask(taskId, { status: "blocked" });
-        await this.appendLog(taskId, "", `Blocked — waiting on ${unmetDeps.length} dependency(ies): ${unmetDeps.join(", ")}`, "info");
-        return;
-      }
-    }
-
-    // Check if we should auto-approve based on project autonomy level
-    const project = task.projectId ? await this.getProject(task.projectId) : null;
-    const autonomy = project?.autonomyLevel ?? "supervised";
-    const fileCount = result.payload.touchSet.length;
-    const shouldAutoApprove =
-      autonomy === "full" ||
-      (autonomy === "high" && fileCount <= 10) ||
-      (autonomy === "moderate" && fileCount <= 3);
-
-    if (shouldAutoApprove) {
-      await this.appendLog(taskId, "", `Auto-approved (autonomy: ${autonomy}, ${fileCount} files). Queuing for execution.`, "info");
-      await this.approvePlan(taskId);
-    } else {
-      await this.appendLog(taskId, "", `Plan ready for review: ${result.payload.subtasks.length} subtasks. Waiting for approval.`, "info");
-    }
-  }
+  // --- Task Execution ---
 
   /**
-   * Infer dependencies by checking touch-set overlap with earlier non-terminal tasks.
-   * Returns task IDs that this task should depend on.
+   * Execute a task: create sandbox, write CLAUDE.md, configure auto-start.
+   * Claude Code launches when the user connects to the terminal.
+   * The orchestrator just sets up the sandbox and returns immediately.
    */
-  private async inferDependencies(
-    taskId: string,
-    projectId: string,
-    touchSet: string[],
-    createdAt: string,
-  ): Promise<string[]> {
-    if (touchSet.length === 0) return [];
-
-    const terminalStatuses = ["success", "failed", "cancelled", "closed"];
-    const rows = this.ctx.storage.sql.exec(
-      `SELECT id, touch_set, created_at FROM tasks WHERE project_id = ? AND id != ?`,
-      projectId,
-      taskId,
-    ).toArray();
-
-    const deps: string[] = [];
-    const touchSetLookup = new Set(touchSet);
-
-    for (const row of rows) {
-      const status = (this.ctx.storage.sql.exec(
-        `SELECT status FROM tasks WHERE id = ?`, row.id as string,
-      ).toArray()[0]?.status as string) ?? "";
-
-      if (terminalStatuses.includes(status)) continue;
-
-      const otherTouchSet: string[] = (() => {
-        try { return JSON.parse((row.touch_set as string) || "[]"); }
-        catch { return []; }
-      })();
-      if (otherTouchSet.length === 0) continue;
-
-      // Check overlap
-      const hasOverlap = otherTouchSet.some((f) => touchSetLookup.has(f));
-      if (!hasOverlap) continue;
-
-      // Only depend on tasks created before this one (avoid circular deps)
-      if ((row.created_at as string) < createdAt) {
-        deps.push(row.id as string);
-      }
-    }
-
-    return deps;
-  }
-
-  /**
-   * Approve a plan — transitions from "planned" to ready for execution.
-   */
-  async approvePlan(taskId: string): Promise<void> {
-    const task = await this.getTask(taskId);
-    if (!task || task.status !== "planned") return;
-
-    await this.appendLog(taskId, "", "Plan approved — queuing for execution", "info");
-
-    // Move to the approved_tasks list so the alarm picks it up
-    const approved = await this.ctx.storage.get<string[]>("approved_tasks") ?? [];
-    approved.push(taskId);
-    await this.ctx.storage.put("approved_tasks", approved);
-
-    // Trigger alarm to dispatch immediately
-    await this.ctx.storage.setAlarm(Date.now());
-  }
-
-  /**
-   * Revise a plan based on developer feedback.
-   */
-  async revisePlan(taskId: string, feedback: string): Promise<void> {
-    const task = await this.getTask(taskId);
-    if (!task || task.status !== "planned") return;
-
-    await this.updateTask(taskId, { status: "planning" });
-    await this.appendLog(taskId, "", `Revising plan based on feedback: ${feedback.slice(0, 100)}`, "info");
-
-    const secrets = await this.resolveSecrets();
-    if (!secrets.anthropicApiKey) {
-      await this.updateTask(taskId, { status: "failed", error: "ANTHROPIC_API_KEY not configured" });
-      return;
-    }
-
-    const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
-
-    try {
-      const result = await revisePlan(
-        taskId,
-        task.repoUrl,
-        task.description,
-        task.planMarkdown ?? "",
-        feedback,
-        resolvedEnv,
-      );
-
-      await this.updateTask(taskId, {
-        status: "planned",
-        branchName: result.payload.branchName,
-        subtasks: result.payload.subtasks,
-        touchSet: result.payload.touchSet,
-        planMarkdown: result.planMarkdown,
-      });
-      await this.appendLog(taskId, "", `Plan revised: ${result.payload.subtasks.length} subtasks. Waiting for approval.`, "info");
-    } catch (err) {
-      await this.updateTask(taskId, { status: "planned" }); // Revert to planned so user can retry
-      await this.appendLog(taskId, "", `Plan revision failed: ${err}`, "error");
-    }
-  }
-
-  private async executePlannedTask(taskId: string, env: Env): Promise<void> {
+  private async executeTask(taskId: string, env: Env): Promise<void> {
     const task = await this.getTask(taskId);
     if (!task || task.status === "cancelled") return;
 
     await this.updateTask(taskId, { status: "running", blockedBy: undefined });
-    await this.appendLog(taskId, "", "Starting execution phase...", "info");
+    await this.appendLog(taskId, "", "Booting sandbox...", "info");
 
     try {
       const payload: DispatchPayload = {
@@ -893,49 +622,18 @@ export class TaskCoordinator extends DurableObject<Env> {
         callbackUrl: `${env.WORKER_URL ?? ""}/internal/sandboxes/${taskId}`,
       };
 
-      // Re-analyze repo to get full context for the agent
       const sandboxManager = new SandboxManager(env);
-      const repoAnalysis = await sandboxManager.analyzeRepo(task.repoUrl, taskId);
-      payload.repoContext = {
-        repoUrl: task.repoUrl,
-        defaultBranch: repoAnalysis.defaultBranch,
-        projectType: repoAnalysis.projectType,
-        structure: repoAnalysis.structure,
-      };
-
       const { sandbox } = await sandboxManager.create(payload);
 
-      // Use interactive Claude Code — the user can watch and interact
-      // via the terminal WebSocket at /v1/tasks/:id/terminal
+      // Configure sandbox: write CLAUDE.md, env vars, auto-start in .bashrc
+      // Claude Code will launch when the terminal PTY connects
       await sandboxManager.runInteractiveAgent(sandbox, payload, async (msg) => {
         await this.appendLog(taskId, `task-${taskId}`, msg, "info");
-      }, async (partial) => {
-        // Persist PR URL and preview URL immediately as they're discovered
-        const updates: Record<string, unknown> = {};
-        if (partial.prUrl) {
-          updates.prUrl = partial.prUrl;
-          // Extract PR number
-          const prMatch = partial.prUrl.match(/\/pull\/(\d+)/);
-          if (prMatch) updates.prNumber = parseInt(prMatch[1], 10);
-        }
-        if (partial.previewUrl) {
-          updates.previewUrl = partial.previewUrl;
-        }
-        if (Object.keys(updates).length > 0) {
-          await this.updateTask(taskId, updates as Partial<Task>);
-        }
       });
 
-      // Check what the agent accomplished
-      const updatedTask = await this.getTask(taskId);
-      await this.updateTask(taskId, { status: "reviewing" });
+      await this.appendLog(taskId, "", "Sandbox ready — open the Terminal tab to see Claude Code working", "info");
 
-      await this.appendLog(taskId, "", "Agent session complete — sandbox kept alive for interaction", "info");
-      if (updatedTask?.previewUrl) {
-        await this.appendLog(taskId, "", `Preview available at ${updatedTask.previewUrl}`, "info");
-      }
-
-      // Track that this sandbox is alive for review fixes
+      // Track that this sandbox is alive
       const watching = await this.ctx.storage.get<string[]>("watching_tasks") ?? [];
       if (!watching.includes(taskId)) {
         watching.push(taskId);
@@ -945,7 +643,6 @@ export class TaskCoordinator extends DurableObject<Env> {
       console.error(`Task ${taskId} failed:`, err);
       await this.updateTask(taskId, { status: "failed", error: String(err) });
       await this.appendLog(taskId, "", `Task failed: ${err}`, "error");
-      // Destroy sandbox on failure — no reason to keep it alive
       const sandboxManager = new SandboxManager(this.env);
       await sandboxManager.destroy(taskId).catch(() => {});
     }
@@ -986,194 +683,39 @@ export class TaskCoordinator extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Enqueue a review fix — now just logs and broadcasts.
+   * The user uses the terminal "Fix Reviews" button to tell the running agent about them.
+   */
   async enqueueReviewFix(taskId: string): Promise<void> {
     const task = await this.getTask(taskId);
     if (!task) return;
 
-    // Only process if task is in reviewing state
-    if (task.status !== "reviewing") {
-      await this.appendLog(taskId, "", `Skipping review fix — task status is ${task.status}`, "warn");
+    // Only process if task is in reviewing or running state
+    if (!["reviewing", "running", "fixing"].includes(task.status)) {
+      await this.appendLog(taskId, "", `Skipping review — task status is ${task.status}`, "warn");
       return;
     }
 
-    const pending = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
-    if (!pending.includes(taskId)) {
-      pending.push(taskId);
-      await this.ctx.storage.put("pending_review_fixes", pending);
-    }
-
-    // Schedule alarm immediately to process review fixes
-    await this.ctx.storage.setAlarm(Date.now());
-  }
-
-  private async processReviewFixes(): Promise<void> {
-    const pending = await this.ctx.storage.get<string[]>("pending_review_fixes") ?? [];
-    if (pending.length === 0) return;
-
-    const secrets = await this.resolveSecrets();
-    if (!secrets.anthropicApiKey || !secrets.githubToken) return;
-
-    const resolvedEnv: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
-
-    // Process one review fix at a time
-    const taskId = pending.shift()!;
-    await this.ctx.storage.put("pending_review_fixes", pending);
-
-    try {
-      await this.executeReviewFix(taskId, resolvedEnv);
-    } catch (err) {
-      console.error(`Review fix failed for task ${taskId}:`, err);
-      await this.appendLog(taskId, "", `Review fix failed: ${err}`, "error");
-      // Return to reviewing state so it can try again
-      await this.updateTask(taskId, { status: "reviewing" });
-    }
-  }
-
-  private async executeReviewFix(taskId: string, env: Env): Promise<void> {
-    const task = await this.getTask(taskId);
-    if (!task) return;
-
+    // Get unprocessed reviews and log them
     const reviews = await this.getUnprocessedReviews(taskId);
-    if (reviews.length === 0) {
-      await this.appendLog(taskId, "", "No unprocessed reviews to fix", "info");
-      return;
-    }
+    if (reviews.length === 0) return;
 
-    await this.updateTask(taskId, { status: "fixing" });
-    this.broadcast({ type: "review_fix_started", taskId, timestamp: new Date().toISOString(), data: { reviewCount: reviews.length } });
-    await this.appendLog(taskId, "", `Processing ${reviews.length} review comment(s)...`, "info");
-
-    const sandboxManager = new SandboxManager(env);
-    // Get existing sandbox (still alive from initial run)
-    const sandboxId = `task-${taskId}`.toLowerCase();
-    const { getSandbox } = await import("@cloudflare/sandbox");
-    const sandbox = getSandbox(env.Sandbox, sandboxId, { keepAlive: true });
-
-    // Recover workspace if sandbox was recycled
-    const wsCheck = await sandbox.exec("ls /workspace/package.json 2>/dev/null && echo 'ok' || echo 'empty'");
-    if (wsCheck.stdout.trim() === "empty") {
-      await this.appendLog(taskId, "", "Workspace empty — re-cloning repo...", "info");
-      const token = env.GITHUB_TOKEN ?? "";
-      const authedUrl = task.repoUrl.replace("https://", `https://x-access-token:${token}@`);
-      await sandbox.exec(`git clone ${authedUrl} /workspace 2>&1`);
-      await sandbox.exec(`cd /workspace && git checkout ${task.branchName} 2>&1`, { cwd: "/workspace" });
-      await sandbox.exec(`cd /workspace && npm install --no-audit --no-fund 2>&1`, { cwd: "/workspace" });
-      await sandbox.exec('git config --global user.name "Phil Agent"');
-      await sandbox.exec('git config --global user.email "phil@agent.local"');
-      if (token) {
-        await sandbox.exec(
-          `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=${token}"; }; f'`,
-        );
-      }
-    }
-
-    // Build review context for the agent
     const reviewContext = reviews.map((r) => {
       let ctx = `**${r.author}**: ${r.body}`;
       if (r.path) ctx += `\n  File: ${r.path}${r.line ? `:${r.line}` : ""}`;
       return ctx;
     }).join("\n\n");
 
-    // Run review-fix agent loop
-    const { runReviewFixLoop } = await import("../sandbox/review-agent.js");
-    const result = await runReviewFixLoop(sandbox, task, reviewContext, env, async (msg) => {
-      await this.appendLog(taskId, `task-${taskId}`, msg, "info");
-    });
+    // Log review context so it appears in the dashboard
+    await this.appendLog(taskId, "", `New review comments:\n${reviewContext}`, "info");
+    await this.appendLog(taskId, "", "Use the terminal 'Fix Reviews' button to have the agent address these comments.", "info");
 
-    // Store review-fix context (appends to existing context)
-    if (result.agentContext) {
-      const existing = await this.getContext(taskId);
-      if (existing) {
-        // Append review-fix context to existing
-        try {
-          const prev = JSON.parse(existing);
-          const next = JSON.parse(result.agentContext);
-          prev.push({ type: "text", content: "--- Review Fix ---" }, ...next);
-          await this.storeContext(taskId, JSON.stringify(prev));
-        } catch {
-          await this.storeContext(taskId, result.agentContext);
-        }
-      } else {
-        await this.storeContext(taskId, result.agentContext);
-      }
-    }
-
-    // Mark reviews as processed
+    // Mark reviews as processed (they've been logged)
     await this.markReviewsProcessed(taskId, reviews.map((r) => r.id));
 
-    // Check for preview server after review fix (agent may have started one)
-    if (!task.previewUrl) {
-      try {
-        let portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-
-        // If no server running, try to start one automatically
-        if (!portCheck.stdout.includes("LISTENING")) {
-          await this.appendLog(taskId, "", "No server on port 8080 — attempting to start one...", "info");
-
-          // Strategy 1: serve pre-built dist/ if available
-          const findDist = await sandbox.exec(
-            `find /workspace -maxdepth 4 -path '*/dist/index.html' -not -path '*/node_modules/*' 2>/dev/null | head -1 || true`,
-          );
-          if (findDist.success && findDist.stdout.trim()) {
-            const distDir = findDist.stdout.trim().replace(/\/index\.html$/, "");
-            await this.appendLog(taskId, "", `Serving built assets from ${distDir}`, "info");
-            await sandbox.exec(
-              `bash -c 'npx -y serve ${distDir} -l 8080 > /tmp/dev-server.log 2>&1 &'`,
-              { env: { HOME: "/root" } },
-            );
-            await new Promise((r) => setTimeout(r, 3000));
-            portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-          }
-
-          // Strategy 2: find frontend package and start dev server
-          if (!portCheck.stdout.includes("LISTENING")) {
-            let serverDir = "/workspace";
-            const findFrontend = await sandbox.exec(
-              `find /workspace -maxdepth 3 -name 'vite.config.*' -o -name 'next.config.*' 2>/dev/null | grep -v node_modules | head -1 || true`,
-            );
-            if (findFrontend.success && findFrontend.stdout.trim()) {
-              serverDir = findFrontend.stdout.trim().replace(/\/[^/]+$/, "");
-            }
-            const pkgCheck = await sandbox.exec(`cat ${serverDir}/package.json 2>/dev/null || true`);
-            if (pkgCheck.success && pkgCheck.stdout.includes("{")) {
-              await this.appendLog(taskId, "", `Installing deps in ${serverDir}...`, "info");
-              const hasPnpm = await sandbox.exec(`ls /workspace/pnpm-lock.yaml 2>/dev/null && echo 'yes' || echo 'no'`);
-              const installCmd = hasPnpm.stdout.includes("yes")
-                ? `cd /workspace && pnpm install --no-frozen-lockfile 2>&1`
-                : `cd ${serverDir} && npm install --no-audit --no-fund 2>&1`;
-              await sandbox.exec(installCmd, { cwd: serverDir });
-              const startCmd = pkgCheck.stdout.includes('"dev"')
-                ? "npm run dev -- --port 8080 --host 0.0.0.0"
-                : pkgCheck.stdout.includes('"start"')
-                  ? "PORT=8080 npm start"
-                  : `npx -y serve ${serverDir} -l 8080`;
-              await this.appendLog(taskId, "", `Starting server in ${serverDir}: ${startCmd}`, "info");
-              await sandbox.exec(
-                `bash -c 'cd ${serverDir} && ${startCmd} > /tmp/dev-server.log 2>&1 &'`,
-                { env: { PORT: "8080", HOME: "/root" } },
-              );
-              await new Promise((r) => setTimeout(r, 8000));
-              portCheck = await sandbox.exec("curl -sf http://localhost:8080 -o /dev/null && echo 'LISTENING' || echo 'CLOSED'");
-            }
-          }
-        }
-
-        if (portCheck.success && portCheck.stdout.includes("LISTENING")) {
-          await this.appendLog(taskId, "", "Preview server detected on port 8080 — exposing...", "info");
-          const hostname = env.PREVIEW_HOSTNAME ?? new URL(env.WORKER_URL ?? "https://localhost").hostname;
-          const exposed = await sandbox.exposePort(8080, { hostname });
-          await this.updateTask(taskId, { previewUrl: exposed.url });
-          await this.appendLog(taskId, "", `Preview URL: ${exposed.url}`, "info");
-        }
-      } catch (err) {
-        await this.appendLog(taskId, "", `Preview expose failed: ${err}`, "info");
-      }
-    }
-
     const cycles = (task.reviewCycles ?? 0) + 1;
-    await this.updateTask(taskId, { status: "reviewing", reviewCycles: cycles });
-    this.broadcast({ type: "review_fix_completed", taskId, timestamp: new Date().toISOString(), data: { cycles, pushed: result.pushed } });
-    await this.appendLog(taskId, "", `Review fix cycle ${cycles} complete${result.pushed ? " — changes pushed" : ""}`, "info");
+    await this.updateTask(taskId, { reviewCycles: cycles });
   }
 
   // --- Escalation ---
@@ -1232,7 +774,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     await this.appendLog(taskId, "", "Task cancelled", "info");
 
     // Remove from all tracking lists
-    for (const key of ["pending_tasks", "running_tasks", "watching_tasks", "approved_tasks"] as const) {
+    for (const key of ["pending_tasks", "running_tasks", "watching_tasks"] as const) {
       const list = await this.ctx.storage.get<string[]>(key) ?? [];
       await this.ctx.storage.put(key, list.filter((id) => id !== taskId));
     }
@@ -1250,7 +792,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     await this.appendLog(taskId, "", "Task closed", "info");
 
     // Remove from all tracking lists
-    for (const key of ["pending_tasks", "running_tasks", "watching_tasks", "approved_tasks"] as const) {
+    for (const key of ["pending_tasks", "running_tasks", "watching_tasks"] as const) {
       const list = await this.ctx.storage.get<string[]>(key) ?? [];
       await this.ctx.storage.put(key, list.filter((id) => id !== taskId));
     }
@@ -1277,7 +819,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       const age = now - new Date(task.updatedAt).getTime();
 
       // Stuck in non-terminal, non-review states for >30 min
-      if (["planning", "running", "queued"].includes(task.status) && age > staleThreshold) {
+      if (["running", "queued"].includes(task.status) && age > staleThreshold) {
         console.log(`Cleanup: task ${task.id} stuck in ${task.status} for ${Math.round(age / 60000)}m`);
         await this.updateTask(task.id, { status: "failed", error: "Auto-cleanup: task was stale" });
         await this.appendLog(task.id, "", "Auto-cleanup: sandbox destroyed (task was stale)", "warn");

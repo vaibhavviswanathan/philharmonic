@@ -168,28 +168,6 @@ export async function closeTask(id: string): Promise<void> {
   }
 }
 
-// --- Plan Approval ---
-
-export async function approvePlan(taskId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/plan/approve`, { method: "POST" });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((body as { error?: string }).error ?? res.statusText);
-  }
-}
-
-export async function sendPlanFeedback(taskId: string, feedback: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/plan/feedback`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ feedback }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((body as { error?: string }).error ?? res.statusText);
-  }
-}
-
 // --- Messages (Escalation / Chat) ---
 
 export interface Message {

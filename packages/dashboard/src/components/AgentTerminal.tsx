@@ -17,6 +17,7 @@ export const AgentTerminal = forwardRef<
   const terminalRef = useRef<Terminal | null>(null);
   const sandboxAddonRef = useRef<SandboxAddon | null>(null);
   const [connState, setConnState] = useState<ConnectionState>("disconnected");
+  const autoStartedRef = useRef(false);
 
   useImperativeHandle(ref, () => ({
     sendCommand(text: string) {
@@ -54,6 +55,25 @@ export const AgentTerminal = forwardRef<
         setConnState(state);
         if (error) {
           console.warn("[AgentTerminal] connection error:", error.message);
+        }
+        // Auto-start Claude Code when shell is ready
+        if (state === "connected" && !autoStartedRef.current) {
+          autoStartedRef.current = true;
+          // Wait for shell prompt before sending command
+          const dispose = terminal.onData((data) => {
+            // Shell prompt ends with # or $ — means it's ready for input
+            if (data.includes("#") || data.includes("$")) {
+              dispose.dispose();
+              setTimeout(() => {
+                terminal.input("/workspace/.phil-start.sh\n", false);
+              }, 200);
+            }
+          });
+          // Fallback: if no prompt detected within 5s, send anyway
+          setTimeout(() => {
+            dispose.dispose();
+            terminal.input("/workspace/.phil-start.sh\n", false);
+          }, 5000);
         }
       },
     });

@@ -223,7 +223,7 @@ app.post("/v1/tasks/retrigger", async (c) => {
 app.post("/v1/tasks/cleanup", async (c) => {
   const coordinator = getCoordinator(c.env);
   const allTasks = await doRpc<Task[]>(coordinator, "listTasks");
-  const staleStatuses = ["planning", "running", "queued"];
+  const staleStatuses = ["running", "queued"];
   const terminalStatuses = ["success", "failed", "cancelled", "closed"];
   const staleThreshold = 30 * 60 * 1000; // 30 minutes
   const now = Date.now();
@@ -553,34 +553,6 @@ app.post("/v1/tasks/:id/unstick", async (c) => {
     await doRpc(coordinator, "cancelTask", taskId);
     return c.json({ ok: true, status: "cancelled" });
   }
-});
-
-// --- Plan Approval ---
-
-app.post("/v1/tasks/:id/plan/approve", async (c) => {
-  const taskId = c.req.param("id");
-  const coordinator = getCoordinator(c.env);
-  const task = await doRpc<Task | null>(coordinator, "getTask", taskId);
-  if (!task) return c.json({ error: "Task not found" }, 404);
-  if (task.status !== "planned") return c.json({ error: `Task is ${task.status}, not planned` }, 400);
-
-  await doRpc(coordinator, "approvePlan", taskId);
-  return c.json({ ok: true });
-});
-
-app.post("/v1/tasks/:id/plan/feedback", async (c) => {
-  const taskId = c.req.param("id");
-  const body = await c.req.json() as { feedback: string };
-  if (!body.feedback?.trim()) return c.json({ error: "Feedback is required" }, 400);
-
-  const coordinator = getCoordinator(c.env);
-  const task = await doRpc<Task | null>(coordinator, "getTask", taskId);
-  if (!task) return c.json({ error: "Task not found" }, 404);
-  if (task.status !== "planned") return c.json({ error: `Task is ${task.status}, not planned` }, 400);
-
-  // revisePlan runs in the DO context (alarm) for wall-clock time
-  c.executionCtx.waitUntil(doRpc(coordinator, "revisePlan", taskId, body.feedback));
-  return c.json({ ok: true, message: "Revising plan..." });
 });
 
 // --- Merge PR ---
