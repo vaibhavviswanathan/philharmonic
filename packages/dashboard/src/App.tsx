@@ -1,10 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { listProjects, deleteProject, type Project } from "./api.js";
-import { NewProjectForm } from "./components/NewProjectForm.js";
+import { listProjects, deleteProject, createProject, type Project } from "./api.js";
 import { ProjectView } from "./components/ProjectView.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
-
-type View = { type: "projects" } | { type: "project"; project: Project } | { type: "settings" };
+import { Sidebar } from "./components/Sidebar.js";
+import { type View } from "./types.js";
 
 const ROUTE_KEY = "phil-dashboard-route";
 
@@ -19,11 +18,14 @@ function loadStoredRoute(): { type: string; projectId?: string } | null {
 
 function saveRoute(view: View) {
   try {
-    const data = view.type === "project"
-      ? { type: "project", projectId: view.project.id }
-      : { type: view.type };
+    const data =
+      view.type === "project"
+        ? { type: "project", projectId: view.project.id }
+        : { type: view.type };
     localStorage.setItem(ROUTE_KEY, JSON.stringify(data));
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 export function App() {
@@ -48,98 +50,199 @@ export function App() {
     refresh();
   }, [refresh]);
 
-  // Restore project view after projects load
   useEffect(() => {
     const r = storedRoute.current;
     if (r?.type === "project" && r.projectId && projects.length > 0) {
       const project = projects.find((p) => p.id === r.projectId);
       if (project) {
-        storedRoute.current = null; // only restore once
+        storedRoute.current = null;
         setView({ type: "project", project });
       }
     }
   }, [projects]);
 
-  if (view.type === "settings") {
-    return (
-      <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
-        <Header onSettings={() => navigate({ type: "settings" })} />
-        <SettingsPanel onBack={() => navigate({ type: "projects" })} />
-      </div>
-    );
-  }
-
-  if (view.type === "project") {
-    return (
-      <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
-        <Header onSettings={() => navigate({ type: "settings" })} />
-        <ProjectView
-          project={view.project}
-          onBack={() => { navigate({ type: "projects" }); refresh(); }}
-        />
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen max-w-6xl mx-auto p-6 space-y-6">
-      <Header onSettings={() => navigate({ type: "settings" })} />
-
-      <NewProjectForm onCreated={refresh} />
-
-      <div className="space-y-3">
-        <h2 className="text-lg font-semibold">
-          Projects {projects.length > 0 && `(${projects.length})`}
-        </h2>
-        {projects.length === 0 && (
-          <p className="text-gray-500 text-sm">No projects yet. Add one above.</p>
+    <div className="flex h-screen bg-[#191919] text-[#e5e5e5] overflow-hidden">
+      <Sidebar
+        projects={projects}
+        view={view}
+        onNavigate={navigate}
+        onDeleteProject={(id) => deleteProject(id).then(refresh)}
+      />
+      <main className="flex-1 overflow-y-auto">
+        {view.type === "settings" && (
+          <SettingsPanel onBack={() => navigate({ type: "projects" })} />
         )}
-        {projects.map((project) => (
-          <div
-            key={project.id}
-            onClick={() => navigate({ type: "project", project })}
-            className="p-4 bg-gray-900 rounded-lg border border-gray-800 hover:border-gray-600 cursor-pointer transition-colors group"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium">{project.name}</p>
-                <p className="text-sm text-gray-400 mt-0.5">{project.repoUrl}</p>
-              </div>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (confirm(`Delete project "${project.name}" and all its tasks?`)) {
-                    deleteProject(project.id).then(refresh);
-                  }
-                }}
-                className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-sm px-2"
-              >
-                Delete
-              </button>
-            </div>
-            <p className="text-xs text-gray-500 mt-1">
-              Created {new Date(project.createdAt).toLocaleDateString()}
-            </p>
-          </div>
-        ))}
-      </div>
+        {view.type === "project" && (
+          <ProjectView
+            project={view.project}
+            onBack={() => {
+              navigate({ type: "projects" });
+              refresh();
+            }}
+          />
+        )}
+        {view.type === "projects" && (
+          <ProjectsHome
+            projects={projects}
+            onNavigate={navigate}
+            onRefresh={refresh}
+            onDeleteProject={(id) => deleteProject(id).then(refresh)}
+          />
+        )}
+      </main>
     </div>
   );
 }
 
-function Header({ onSettings }: { onSettings: () => void }) {
+function ProjectsHome({
+  projects,
+  onNavigate,
+  onRefresh,
+  onDeleteProject,
+}: {
+  projects: Project[];
+  onNavigate: (v: View) => void;
+  onRefresh: () => void;
+  onDeleteProject: (id: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [showForm, setShowForm] = useState(false);
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      await createProject(name, repoUrl);
+      setName("");
+      setRepoUrl("");
+      setShowForm(false);
+      onRefresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <header className="flex items-center justify-between">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-bold">Phil</h1>
-        <span className="text-sm text-gray-500">AI Coding Agent</span>
+    <div className="max-w-2xl mx-auto px-10 py-12">
+      {/* Page header */}
+      <div className="mb-8">
+        <div className="text-4xl mb-3">🤖</div>
+        <h1 className="text-3xl font-bold text-[#e5e5e5] tracking-tight">Projects</h1>
+        <p className="text-[#666] text-sm mt-1">Delegate coding tasks to Phil, your AI agent.</p>
       </div>
-      <button
-        onClick={onSettings}
-        className="text-sm text-gray-400 hover:text-white"
-      >
-        Settings
-      </button>
-    </header>
+
+      {/* New project */}
+      <div className="mb-8">
+        {!showForm ? (
+          <button
+            onClick={() => setShowForm(true)}
+            className="flex items-center gap-2 text-[#666] hover:text-[#999] text-sm transition-colors group"
+          >
+            <span className="w-5 h-5 rounded border border-dashed border-[#444] flex items-center justify-center group-hover:border-[#666] transition-colors text-[#555] group-hover:text-[#999]">
+              +
+            </span>
+            New project
+          </button>
+        ) : (
+          <form
+            onSubmit={handleCreate}
+            className="notion-panel p-5 space-y-4"
+          >
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-sm font-semibold text-[#e5e5e5]">New Project</h3>
+              <button
+                type="button"
+                onClick={() => { setShowForm(false); setError(""); }}
+                className="text-[#555] hover:text-[#999] text-xs transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="space-y-3">
+              <input
+                type="text"
+                placeholder="Project name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                autoFocus
+                className="notion-input"
+              />
+              <input
+                type="url"
+                placeholder="https://github.com/org/repo"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                required
+                className="notion-input"
+              />
+            </div>
+            {error && <p className="text-red-400 text-xs">{error}</p>}
+            <button
+              type="submit"
+              disabled={loading}
+              className="notion-btn-primary"
+            >
+              {loading ? "Creating..." : "Create project"}
+            </button>
+          </form>
+        )}
+      </div>
+
+      {/* Projects list */}
+      {projects.length > 0 && (
+        <div>
+          <div className="text-[11px] font-semibold text-[#555] uppercase tracking-widest mb-2 px-1">
+            All projects
+          </div>
+          <div className="notion-panel overflow-hidden">
+            {projects.map((project, i) => (
+              <div
+                key={project.id}
+                onClick={() => onNavigate({ type: "project", project })}
+                className={`group flex items-center gap-3 px-4 py-3 hover:bg-[#2d2d2d] cursor-pointer transition-colors ${
+                  i < projects.length - 1 ? "border-b border-[#3d3d3d]" : ""
+                }`}
+              >
+                <span className="text-xl flex-shrink-0">📁</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-[#e5e5e5] truncate">{project.name}</p>
+                  <p className="text-xs text-[#666] truncate mt-0.5">{project.repoUrl}</p>
+                </div>
+                <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                  <span className="text-xs text-[#555]">
+                    {new Date(project.createdAt).toLocaleDateString()}
+                  </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm(`Delete "${project.name}" and all its tasks?`)) {
+                        onDeleteProject(project.id);
+                      }
+                    }}
+                    className="text-[#555] hover:text-red-400 text-xs transition-colors px-1.5 py-0.5 rounded hover:bg-[#3d3d3d]"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {projects.length === 0 && !showForm && (
+        <div className="text-center py-16 text-[#555]">
+          <p className="text-sm">No projects yet. Create one to get started.</p>
+        </div>
+      )}
+    </div>
   );
 }

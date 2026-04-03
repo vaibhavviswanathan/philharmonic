@@ -39,18 +39,18 @@ export function KanbanBoard({
   );
 
   return (
-    <div className="flex gap-3 overflow-x-auto pb-2">
+    <div className="flex gap-3 overflow-x-auto pb-3">
       {activeColumns.map((col) => (
         <div
           key={col.status}
-          className={`flex-shrink-0 w-64 bg-gray-900/50 rounded-lg border-t-2 ${col.color}`}
+          className={`flex-shrink-0 w-64 bg-[#252525] rounded-lg border-t-2 border border-[#3d3d3d] ${col.color}`}
         >
-          <div className="p-3 border-b border-gray-800">
+          <div className="px-3 py-2.5 border-b border-[#3d3d3d]">
             <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-gray-300">
+              <span className="text-xs font-semibold text-[#999]">
                 {col.label}
               </span>
-              <span className="text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
+              <span className="text-[10px] text-[#555] bg-[#2d2d2d] px-1.5 py-0.5 rounded font-medium">
                 {grouped.get(col.status)?.length ?? 0}
               </span>
             </div>
@@ -80,9 +80,9 @@ function KanbanCard({
   return (
     <div
       onClick={onClick}
-      className="p-3 bg-gray-900 rounded-md border border-gray-800 hover:border-gray-600 cursor-pointer transition-colors"
+      className="p-3 bg-[#2d2d2d] rounded-md border border-[#3d3d3d] hover:border-[#555] cursor-pointer transition-colors"
     >
-      <p className="text-xs font-medium mb-1.5 line-clamp-2 leading-relaxed">
+      <p className="text-xs font-medium text-[#e5e5e5] mb-1.5 line-clamp-2 leading-relaxed">
         {task.description}
       </p>
       {task.subtasks.length > 0 && (
@@ -97,7 +97,7 @@ function KanbanCard({
                     ? "bg-yellow-500"
                     : s.status === "failed"
                       ? "bg-red-500"
-                      : "bg-gray-700"
+                      : "bg-[#3d3d3d]"
               }`}
             />
           ))}
@@ -112,7 +112,7 @@ function KanbanCard({
         )}
       </div>
       {task.branchName && task.branchName !== `phil/${task.id.slice(0, 8)}` && (
-        <p className="text-[10px] text-gray-500 mt-1 font-mono truncate">
+        <p className="text-[10px] text-[#555] mt-1 font-mono truncate">
           {task.branchName}
         </p>
       )}

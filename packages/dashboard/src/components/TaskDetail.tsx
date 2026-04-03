@@ -1,5 +1,18 @@
 import { useEffect, useState, useRef } from "react";
-import { getTask, getLogs, getContext, mergeTask, closeTask, cancelTask, startTask, exposePort, subscribeToEvents, type Task, type PhilEvent, type ContextEntry } from "../api.js";
+import {
+  getTask,
+  getLogs,
+  getContext,
+  mergeTask,
+  closeTask,
+  cancelTask,
+  startTask,
+  exposePort,
+  subscribeToEvents,
+  type Task,
+  type PhilEvent,
+  type ContextEntry,
+} from "../api.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { PlanReview } from "./PlanReview.js";
@@ -82,194 +95,198 @@ export function TaskDetail({
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  if (!task) return <div className="p-4">Loading...</div>;
+  if (!task) {
+    return (
+      <div className="max-w-3xl mx-auto px-10 py-12">
+        <div className="text-[#555] text-sm animate-pulse">Loading task...</div>
+      </div>
+    );
+  }
 
   const isReviewPhase = task.status === "reviewing" || task.status === "fixing";
 
   return (
-    <div className="space-y-4">
-      <button
-        onClick={onBack}
-        className="text-sm text-gray-400 hover:text-white"
-      >
-        &larr; Back
-      </button>
+    <div className="max-w-3xl mx-auto px-10 py-12 space-y-6">
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-2 text-xs text-[#555]">
+        <button onClick={onBack} className="hover:text-[#999] transition-colors">
+          Project
+        </button>
+        <span>/</span>
+        <span className="text-[#999] font-mono">{task.id.slice(0, 8)}</span>
+      </div>
 
-      <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-3">
-            <StatusBadge status={task.status} />
-            <span className="text-xs text-gray-500 font-mono">{task.id}</span>
-            {task.reviewCycles ? (
-              <span className="text-xs text-purple-400">
-                {task.reviewCycles} review cycle{task.reviewCycles > 1 ? "s" : ""}
-              </span>
-            ) : null}
-          </div>
-          <div className="flex gap-2">
-            {isReviewPhase && task.prUrl && (
-              <button
-                onClick={() => {
-                  if (confirm("Merge this PR and close the task?")) {
-                    mergeTask(task.id)
-                      .then(() => getTask(taskId).then(setTask))
-                      .catch((err) => alert(`Merge failed: ${err.message}`));
-                  }
-                }}
-                className="px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-xs font-medium"
-              >
-                Approve & Merge
-              </button>
-            )}
-            {isReviewPhase && (
-              <button
-                onClick={() => {
-                  if (confirm("Close this task and its PR? This cannot be undone.")) {
-                    closeTask(task.id)
-                      .then(() => getTask(taskId).then(setTask))
-                      .catch((err) => alert(`Close failed: ${err.message}`));
-                  }
-                }}
-                className="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs font-medium"
-              >
-                Close
-              </button>
-            )}
-            {(task.status === "planning" || task.status === "planned" || task.status === "queued" || task.status === "running" || task.status === "blocked") && (
-              <button
-                onClick={() => {
-                  if (confirm("Cancel this task?")) {
-                    cancelTask(task.id)
-                      .then(() => getTask(taskId).then(setTask))
-                      .catch((err) => alert(`Cancel failed: ${err.message}`));
-                  }
-                }}
-                className="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs font-medium"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
+      {/* Page header */}
+      <div>
+        <div className="flex items-center gap-3 mb-3">
+          <StatusBadge status={task.status} />
+          {task.reviewCycles ? (
+            <span className="text-xs text-purple-400">
+              {task.reviewCycles} review cycle{task.reviewCycles > 1 ? "s" : ""}
+            </span>
+          ) : null}
+          <span className="text-xs text-[#555] font-mono ml-auto">{task.id}</span>
         </div>
-        <p className="font-medium mb-1">{task.description}</p>
-        <p className="text-sm text-gray-400">{task.repoUrl}</p>
+        <h1 className="text-2xl font-bold text-[#e5e5e5] tracking-tight leading-snug">
+          {task.description}
+        </h1>
+        <p className="text-sm text-[#666] mt-2">{task.repoUrl}</p>
         {task.branchName && (
-          <p className="text-xs text-gray-500 mt-1 font-mono">{task.branchName}</p>
-        )}
-        <div className="flex items-center gap-3 mt-2">
-          {task.prUrl && (
-            <a
-              href={task.prUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-blue-400 hover:underline"
-            >
-              View Pull Request
-            </a>
-          )}
-          {task.previewUrl && !["cancelled", "closed", "failed"].includes(task.status) && (
-            <button
-              onClick={async () => {
-                try {
-                  // Always re-expose to get a fresh token (sandbox may have recycled)
-                  const freshUrl = await exposePort(task.id, 8080);
-                  window.open(freshUrl, "_blank");
-                  // Update task with new URL
-                  getTask(taskId).then(setTask);
-                } catch {
-                  // Fallback to stored URL if expose fails
-                  window.open(task.previewUrl!, "_blank");
-                }
-              }}
-              className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium cursor-pointer"
-            >
-              Live Preview
-            </button>
-          )}
-        </div>
-        {task.status === "blocked" && task.blockedBy && (
-          <p className="mt-2 text-sm text-orange-400">
-            Blocked by task <span className="font-mono">{task.blockedBy}</span> (touch-set conflict)
-          </p>
-        )}
-        {isReviewPhase && (
-          <p className="mt-2 text-sm text-purple-400">
-            Sandbox is alive — add PR review comments or send messages below. The agent will automatically fix them.
-          </p>
-        )}
-        {task.status === "backlog" && (
-          <div className="mt-3">
-            <button
-              onClick={() => {
-                startTask(task.id)
-                  .then(() => getTask(taskId).then(setTask))
-                  .catch((err) => alert(`Start failed: ${(err as Error).message}`));
-              }}
-              className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium"
-            >
-              Start Planning
-            </button>
-            <p className="mt-1 text-xs text-gray-500">Move this task out of backlog and begin planning.</p>
-          </div>
-        )}
-        {task.error && (
-          <p className="mt-2 text-sm text-red-400">{task.error}</p>
+          <code className="text-xs text-[#555] mt-1 block font-mono">{task.branchName}</code>
         )}
       </div>
 
-      {/* Plan review — show when task is planned or being revised */}
+      {/* Actions bar */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {task.prUrl && (
+          <a
+            href={task.prUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="notion-btn-secondary text-blue-400 hover:text-blue-300"
+          >
+            View PR ↗
+          </a>
+        )}
+        {task.previewUrl && !["cancelled", "closed", "failed"].includes(task.status) && (
+          <button
+            onClick={async () => {
+              try {
+                const freshUrl = await exposePort(task.id, 8080);
+                window.open(freshUrl, "_blank");
+                getTask(taskId).then(setTask);
+              } catch {
+                window.open(task.previewUrl!, "_blank");
+              }
+            }}
+            className="notion-btn-secondary text-indigo-400 hover:text-indigo-300"
+          >
+            Live Preview ↗
+          </button>
+        )}
+        {isReviewPhase && task.prUrl && (
+          <button
+            onClick={() => {
+              if (confirm("Merge this PR and close the task?")) {
+                mergeTask(task.id)
+                  .then(() => getTask(taskId).then(setTask))
+                  .catch((err) => alert(`Merge failed: ${err.message}`));
+              }
+            }}
+            className="notion-btn-primary bg-green-600 hover:bg-green-500"
+          >
+            Approve &amp; Merge
+          </button>
+        )}
+        {isReviewPhase && (
+          <button
+            onClick={() => {
+              if (confirm("Close this task and its PR? This cannot be undone.")) {
+                closeTask(task.id)
+                  .then(() => getTask(taskId).then(setTask))
+                  .catch((err) => alert(`Close failed: ${err.message}`));
+              }
+            }}
+            className="notion-btn-ghost text-red-400 hover:text-red-300 hover:bg-red-500/10"
+          >
+            Close PR
+          </button>
+        )}
+        {["planning", "planned", "queued", "running", "blocked"].includes(task.status) && (
+          <button
+            onClick={() => {
+              if (confirm("Cancel this task?")) {
+                cancelTask(task.id)
+                  .then(() => getTask(taskId).then(setTask))
+                  .catch((err) => alert(`Cancel failed: ${err.message}`));
+              }
+            }}
+            className="notion-btn-ghost text-red-400 hover:text-red-300 hover:bg-red-500/10"
+          >
+            Cancel
+          </button>
+        )}
+        {task.status === "backlog" && (
+          <button
+            onClick={() => {
+              startTask(task.id)
+                .then(() => getTask(taskId).then(setTask))
+                .catch((err) => alert(`Start failed: ${(err as Error).message}`));
+            }}
+            className="notion-btn-primary"
+          >
+            Start Planning
+          </button>
+        )}
+      </div>
+
+      {/* Status notes */}
+      {task.status === "blocked" && task.blockedBy && (
+        <div className="flex items-center gap-2 text-sm text-orange-400 bg-orange-500/10 border border-orange-500/20 rounded-lg px-4 py-3">
+          <span>⚠</span>
+          <span>Blocked by task <code className="font-mono text-xs">{task.blockedBy}</code></span>
+        </div>
+      )}
+      {isReviewPhase && (
+        <div className="flex items-center gap-2 text-sm text-purple-400 bg-purple-500/10 border border-purple-500/20 rounded-lg px-4 py-3">
+          <span>💬</span>
+          <span>Sandbox is active — add PR review comments or send messages below. The agent will auto-fix them.</span>
+        </div>
+      )}
+      {task.error && (
+        <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">
+          {task.error}
+        </div>
+      )}
+
+      {/* Plan review */}
       {(task.status === "planned" || (task.status === "planning" && task.planMarkdown)) && (
         <PlanReview task={task} onUpdate={() => getTask(taskId).then(setTask)} />
       )}
 
-      {/* Subtasks — show during execution (running, reviewing, etc.) */}
-      {task.subtasks.length > 0 && task.status !== "planned" && task.status !== "planning" && (
-        <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-          <h3 className="text-sm font-semibold mb-2">Subtasks</h3>
-          <div className="space-y-2">
-            {task.subtasks.map((s) => (
-              <div key={s.id} className="flex items-center gap-2 text-sm">
-                <StatusBadge status={s.status} />
-                <span>{s.description}</span>
-              </div>
-            ))}
+      {/* Subtasks */}
+      {task.subtasks.length > 0 &&
+        task.status !== "planned" &&
+        task.status !== "planning" && (
+          <div className="notion-panel p-5">
+            <h3 className="text-xs font-semibold text-[#555] uppercase tracking-widest mb-3">Subtasks</h3>
+            <div className="space-y-2">
+              {task.subtasks.map((s) => (
+                <div key={s.id} className="flex items-center gap-3 text-sm">
+                  <StatusBadge status={s.status} />
+                  <span className="text-[#e5e5e5]">{s.description}</span>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Chat panel — show for reviewing/fixing tasks, or any task with a PR */}
-      {(isReviewPhase || task.prUrl) && (
-        <ChatPanel taskId={taskId} />
-      )}
+      {/* Chat */}
+      {(isReviewPhase || task.prUrl) && <ChatPanel taskId={taskId} />}
 
-      {/* Context Inspector — show for completed/reviewing tasks */}
+      {/* Context inspector */}
       {["reviewing", "fixing", "success", "failed", "closed"].includes(task.status) && (
         <ContextInspector taskId={taskId} />
       )}
 
-      <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-        <h3 className="text-sm font-semibold mb-2">Agent Logs</h3>
-        <div className="bg-black rounded p-3 max-h-96 overflow-y-auto font-mono text-xs space-y-0.5">
+      {/* Logs */}
+      <div className="notion-panel p-5">
+        <h3 className="text-xs font-semibold text-[#555] uppercase tracking-widest mb-3">Agent Logs</h3>
+        <div className="bg-[#111] rounded-md p-4 max-h-96 overflow-y-auto font-mono text-xs space-y-0.5">
           {logs.length === 0 && (
-            <p className="text-gray-600">Waiting for agent output...</p>
+            <p className="text-[#444]">Waiting for agent output...</p>
           )}
           {logs.map((log, i) => (
             <div
               key={i}
-              className={`text-gray-300 ${
-                log.startsWith("[CONFLICT]")
-                  ? "text-orange-400"
-                  : log.startsWith("[REBASE]")
-                    ? "text-yellow-400"
-                    : log.startsWith("[REVIEW]")
-                      ? "text-purple-400"
-                      : log.startsWith("[FIXING]")
-                        ? "text-purple-300"
-                        : log.startsWith("[FIXED]")
-                          ? "text-green-400"
-                          : log.startsWith("[ESCALATION]")
-                            ? "text-yellow-300"
-                            : ""
+              className={`leading-relaxed ${
+                log.startsWith("[CONFLICT]") ? "text-orange-400"
+                : log.startsWith("[REBASE]")  ? "text-yellow-400"
+                : log.startsWith("[REVIEW]")  ? "text-purple-400"
+                : log.startsWith("[FIXING]")  ? "text-purple-300"
+                : log.startsWith("[FIXED]")   ? "text-green-400"
+                : log.startsWith("[ESCALATION]") ? "text-yellow-300"
+                : "text-[#999]"
               }`}
             >
               {log}
@@ -294,10 +311,13 @@ function ContextInspector({ taskId }: { taskId: string }) {
   };
 
   return (
-    <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
+    <div className="notion-panel p-5">
       <button
-        onClick={() => { setOpen(!open); load(); }}
-        className="flex items-center gap-2 text-sm font-semibold w-full text-left"
+        onClick={() => {
+          setOpen(!open);
+          load();
+        }}
+        className="flex items-center gap-2 text-xs font-semibold text-[#555] uppercase tracking-widest w-full text-left hover:text-[#999] transition-colors"
       >
         <svg
           className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`}
@@ -308,27 +328,42 @@ function ContextInspector({ taskId }: { taskId: string }) {
         >
           <path d="M9 5l7 7-7 7" />
         </svg>
-        Agent Context Inspector
-        {context && <span className="text-xs text-gray-500 font-normal ml-2">({context.length} entries)</span>}
+        Agent Context
+        {context && (
+          <span className="font-normal text-[#555] ml-1">({context.length} entries)</span>
+        )}
       </button>
       {open && (
-        <div className="mt-3 max-h-[500px] overflow-y-auto space-y-1.5">
-          {!context && <p className="text-gray-500 text-xs">Loading...</p>}
-          {context && context.length === 0 && <p className="text-gray-500 text-xs">No context captured for this task.</p>}
+        <div className="mt-4 max-h-[500px] overflow-y-auto space-y-1.5">
+          {!context && <p className="text-[#555] text-xs">Loading...</p>}
+          {context && context.length === 0 && (
+            <p className="text-[#555] text-xs">No context captured for this task.</p>
+          )}
           {context?.map((entry, i) => (
-            <div key={i} className={`text-xs font-mono p-2 rounded ${
-              entry.type === "tool" ? "bg-blue-950/50 border border-blue-900/50" :
-              entry.type === "result" ? "bg-green-950/50 border border-green-900/50" :
-              "bg-gray-800/50 border border-gray-700/50"
-            }`}>
-              <span className={`font-semibold ${
-                entry.type === "tool" ? "text-blue-400" :
-                entry.type === "result" ? "text-green-400" :
-                "text-gray-400"
-              }`}>
-                {entry.type === "tool" ? "Tool" : entry.type === "result" ? "Result" : "Text"}
+            <div
+              key={i}
+              className={`text-xs font-mono p-3 rounded-md ${
+                entry.type === "tool"
+                  ? "bg-blue-500/5 border border-blue-500/15"
+                  : entry.type === "result"
+                    ? "bg-green-500/5 border border-green-500/15"
+                    : "bg-[#2d2d2d] border border-[#3d3d3d]"
+              }`}
+            >
+              <span
+                className={`font-semibold text-[10px] uppercase tracking-wider ${
+                  entry.type === "tool"
+                    ? "text-blue-400"
+                    : entry.type === "result"
+                      ? "text-green-400"
+                      : "text-[#666]"
+                }`}
+              >
+                {entry.type}
               </span>
-              <pre className="mt-1 text-gray-300 whitespace-pre-wrap break-all">{entry.content}</pre>
+              <pre className="mt-1.5 text-[#999] whitespace-pre-wrap break-all leading-relaxed">
+                {entry.content}
+              </pre>
             </div>
           ))}
         </div>
@@ -336,4 +371,3 @@ function ContextInspector({ taskId }: { taskId: string }) {
     </div>
   );
 }
-
