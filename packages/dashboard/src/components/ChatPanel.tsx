@@ -51,37 +51,37 @@ export function ChatPanel({ taskId }: { taskId: string }) {
   }
 
   return (
-    <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-      <h3 className="text-sm font-semibold mb-2">Chat with Agent</h3>
+    <div className="notion-panel p-5">
+      <h3 className="text-xs font-semibold text-[#555] uppercase tracking-widest mb-4">Chat with Agent</h3>
 
-      <div className="bg-black rounded p-3 max-h-64 overflow-y-auto space-y-2 mb-3">
+      <div className="bg-[#111] rounded-md p-3 max-h-64 overflow-y-auto space-y-2 mb-4">
         {messages.length === 0 && (
-          <p className="text-gray-600 text-xs">
-            No messages yet. Send a message to give the agent feedback or instructions.
+          <p className="text-[#444] text-xs">
+            No messages yet. Send feedback or instructions to the agent.
           </p>
         )}
         {messages.map((msg, i) => (
           <div
             key={i}
-            className={`text-xs rounded-md px-3 py-2 max-w-[85%] ${
+            className={`text-xs rounded-lg px-3 py-2 max-w-[85%] ${
               msg.sender === "user"
-                ? "bg-blue-900/50 border border-blue-800 ml-auto text-right"
-                : "bg-gray-800 border border-gray-700"
+                ? "bg-blue-600/20 border border-blue-500/20 ml-auto"
+                : "bg-[#2d2d2d] border border-[#3d3d3d]"
             }`}
           >
-            <div className="flex items-center gap-1.5 mb-0.5">
+            <div className="flex items-center gap-2 mb-1">
               <span
-                className={`font-semibold ${
+                className={`font-semibold text-[10px] uppercase tracking-wide ${
                   msg.sender === "user" ? "text-blue-400" : "text-yellow-400"
                 }`}
               >
                 {msg.sender === "user" ? "You" : "Agent"}
               </span>
-              <span className="text-gray-500 text-[10px]">
+              <span className="text-[#555] text-[10px]">
                 {new Date(msg.createdAt).toLocaleTimeString()}
               </span>
             </div>
-            <p className="text-gray-300 whitespace-pre-wrap">{msg.message}</p>
+            <p className="text-[#e5e5e5] whitespace-pre-wrap leading-relaxed">{msg.message}</p>
           </div>
         ))}
         <div ref={bottomRef} />
@@ -92,13 +92,13 @@ export function ChatPanel({ taskId }: { taskId: string }) {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Send feedback or instructions to the agent..."
-          className="flex-1 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
+          placeholder="Send feedback or instructions..."
+          className="flex-1 bg-[#2d2d2d] border border-[#3d3d3d] rounded-md px-3 py-2 text-sm text-[#e5e5e5] placeholder-[#555] focus:outline-none focus:border-[#555] transition-colors"
         />
         <button
           type="submit"
           disabled={sending || !input.trim()}
-          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm font-medium"
+          className="notion-btn-primary"
         >
           Send
         </button>

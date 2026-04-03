@@ -42,16 +42,16 @@ export function PlanReview({
   }
 
   return (
-    <div className="p-4 bg-gray-900 rounded-lg border border-gray-800">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold">
-          {isRevising ? "Revising Plan..." : "Execution Plan"}
+    <div className="notion-panel p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-[#555] uppercase tracking-widest">
+          {isRevising ? "Revising Plan" : "Execution Plan"}
         </h3>
         {!isRevising && (
           <button
             onClick={handleApprove}
             disabled={approving}
-            className="px-4 py-1.5 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded text-sm font-medium"
+            className="notion-btn-primary bg-green-600 hover:bg-green-500"
           >
             {approving ? "Approving..." : "Approve & Execute"}
           </button>
@@ -59,8 +59,8 @@ export function PlanReview({
       </div>
 
       {isRevising && (
-        <div className="mb-3 flex items-center gap-2 text-sm text-yellow-400">
-          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+        <div className="flex items-center gap-2 text-sm text-yellow-400">
+          <svg className="animate-spin h-3.5 w-3.5 flex-shrink-0" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
@@ -69,22 +69,22 @@ export function PlanReview({
       )}
 
       {task.planMarkdown && (
-        <div className="bg-black rounded p-4 mb-3 text-sm text-gray-300 whitespace-pre-wrap font-mono leading-relaxed overflow-auto max-h-96">
+        <div className="bg-[#111] rounded-md p-4 text-sm text-[#999] whitespace-pre-wrap font-mono leading-relaxed overflow-auto max-h-96 text-xs">
           {task.planMarkdown}
         </div>
       )}
 
       {task.subtasks.length > 0 && (
-        <div className="mb-3">
-          <h4 className="text-xs font-semibold text-gray-400 mb-2">Subtasks</h4>
+        <div>
+          <h4 className="text-[10px] font-semibold text-[#555] uppercase tracking-widest mb-2">Subtasks</h4>
           <div className="space-y-1.5">
             {task.subtasks.map((s, i) => (
-              <div key={s.id} className="flex items-start gap-2 text-sm">
-                <span className="text-gray-500 font-mono text-xs mt-0.5">{i + 1}.</span>
-                <div>
-                  <span className="text-gray-300">{s.description}</span>
+              <div key={s.id} className="flex items-start gap-2.5 text-sm">
+                <span className="text-[#555] font-mono text-xs mt-0.5 w-4 flex-shrink-0 text-right">{i + 1}.</span>
+                <div className="min-w-0">
+                  <span className="text-[#e5e5e5] text-sm">{s.description}</span>
                   {s.fileTargets.length > 0 && (
-                    <div className="text-xs text-gray-500 font-mono mt-0.5">
+                    <div className="text-xs text-[#555] font-mono mt-0.5">
                       {s.fileTargets.join(", ")}
                     </div>
                   )}
@@ -96,11 +96,14 @@ export function PlanReview({
       )}
 
       {task.touchSet.length > 0 && (
-        <div className="mb-3">
-          <h4 className="text-xs font-semibold text-gray-400 mb-1">Files to be modified</h4>
+        <div>
+          <h4 className="text-[10px] font-semibold text-[#555] uppercase tracking-widest mb-2">Files to modify</h4>
           <div className="flex flex-wrap gap-1">
             {task.touchSet.map((f) => (
-              <span key={f} className="px-1.5 py-0.5 bg-gray-800 rounded text-xs font-mono text-gray-400">
+              <span
+                key={f}
+                className="px-2 py-0.5 bg-[#2d2d2d] border border-[#3d3d3d] rounded text-xs font-mono text-[#999]"
+              >
                 {f}
               </span>
             ))}
@@ -109,24 +112,24 @@ export function PlanReview({
       )}
 
       {task.branchName && (
-        <div className="mb-3 text-xs text-gray-500">
-          Branch: <span className="font-mono">{task.branchName}</span>
+        <div className="text-xs text-[#555]">
+          Branch: <code className="font-mono text-[#666]">{task.branchName}</code>
         </div>
       )}
 
       {!isRevising && (
-        <form onSubmit={handleFeedback} className="flex gap-2">
+        <form onSubmit={handleFeedback} className="flex gap-2 pt-1">
           <input
             type="text"
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
-            placeholder="Give feedback on the plan... (e.g. 'use a different approach', 'also add tests')"
-            className="flex-1 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm focus:outline-none focus:border-blue-500"
+            placeholder="Request changes to the plan..."
+            className="flex-1 bg-[#2d2d2d] border border-[#3d3d3d] rounded-md px-3 py-1.5 text-sm text-[#e5e5e5] placeholder-[#555] focus:outline-none focus:border-[#555] transition-colors"
           />
           <button
             type="submit"
             disabled={sending || !feedback.trim()}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm font-medium"
+            className="notion-btn-secondary"
           >
             {sending ? "..." : "Revise"}
           </button>
@@ -135,4 +138,3 @@ export function PlanReview({
     </div>
   );
 }
-// v2
