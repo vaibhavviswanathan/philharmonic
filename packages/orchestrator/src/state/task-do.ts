@@ -1,7 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Task, TaskStatus, Subtask, Project, PhilEvent, DispatchPayload } from "@phil/shared";
+import type { Task, TaskStatus, Subtask, Project, PhilEvent, DispatchPayload, ReviewComment } from "@phil/shared";
 import type { Env } from "../env.js";
 import { SandboxManager } from "../sandbox/manager.js";
+import { ManagerAgent } from "../agent/manager-agent.js";
+import { loadManagerState } from "../agent/state.js";
+import { getSandbox } from "@cloudflare/sandbox";
 
 export class TaskCoordinator extends DurableObject<Env> {
   // --- SQL Schema ---
@@ -409,7 +412,9 @@ export class TaskCoordinator extends DurableObject<Env> {
       await this.ctx.storage.put("pending_tasks", pending);
     }
 
-    if (pending.length === 0 && running.length === 0) return;
+    // Check if there are watching tasks (manager agents) even if no pending/running
+    const watchingTasks = await this.ctx.storage.get<string[]>("watching_tasks") ?? [];
+    if (pending.length === 0 && running.length === 0 && watchingTasks.length === 0) return;
 
     const secrets = await this.resolveSecrets();
 
@@ -499,9 +504,13 @@ export class TaskCoordinator extends DurableObject<Env> {
         }
       }
 
-      // Remove completed tasks from running set
+      // Remove tasks that failed during executeTask() from running set
+      // (tasks that are still "running" should stay in the set)
       const currentRunning = await this.ctx.storage.get<string[]>("running_tasks") ?? [];
-      const stillRunning = currentRunning.filter((id) => !toRun.includes(id));
+      const stillRunning = currentRunning.filter((id) => {
+        const t = this.ctx.storage.sql.exec(`SELECT status FROM tasks WHERE id = ?`, id).toArray()[0];
+        return t && (t.status as string) === "running";
+      });
       await this.ctx.storage.put("running_tasks", stillRunning);
 
       // Check if any blocked tasks can now proceed
@@ -514,12 +523,46 @@ export class TaskCoordinator extends DurableObject<Env> {
     // Cleanup stale sandboxes periodically
     await this.cleanupStaleTasks();
 
-    // Reschedule if there are still pending tasks
+    // Tick active manager agents
+    let hasActiveManagers = false;
+    let hasBootingManagers = false;
+    // Re-read in case it was updated during executeTask
+    const currentWatching = await this.ctx.storage.get<string[]>("watching_tasks") ?? [];
+    for (const taskId of currentWatching) {
+      const managerState = await loadManagerState(this.ctx.storage, taskId);
+      if (managerState && managerState.phase !== "done" && managerState.phase !== "error" && !managerState.waitingForUser) {
+        hasActiveManagers = true;
+        if (managerState.phase === "booting") hasBootingManagers = true;
+        try {
+          const task = await this.getTask(taskId);
+          if (task && task.status === "running") {
+            const manager = this.createManager(taskId, task, { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken });
+            await manager.tick();
+          }
+        } catch (err) {
+          console.error(`Manager tick failed for ${taskId}:`, err);
+        }
+      }
+    }
+
+    // Reschedule — faster when managers are active, even faster when booting
     const remaining = await this.ctx.storage.get<string[]>("pending_tasks") ?? [];
     if (remaining.length > 0) {
       const currentAlarm = await this.ctx.storage.getAlarm();
       if (!currentAlarm) {
         await this.ctx.storage.setAlarm(Date.now() + 1000);
+      }
+    } else if (hasBootingManagers) {
+      // Tick every 5 seconds when managers are booting
+      const currentAlarm = await this.ctx.storage.getAlarm();
+      if (!currentAlarm) {
+        await this.ctx.storage.setAlarm(Date.now() + 5 * 1000);
+      }
+    } else if (hasActiveManagers) {
+      // Tick every 20 seconds when managers are active
+      const currentAlarm = await this.ctx.storage.getAlarm();
+      if (!currentAlarm) {
+        await this.ctx.storage.setAlarm(Date.now() + 20 * 1000);
       }
     } else {
       const currentAlarm = await this.ctx.storage.getAlarm();
@@ -596,9 +639,7 @@ export class TaskCoordinator extends DurableObject<Env> {
   // --- Task Execution ---
 
   /**
-   * Execute a task: create sandbox, write CLAUDE.md, configure auto-start.
-   * Claude Code launches when the user connects to the terminal.
-   * The orchestrator just sets up the sandbox and returns immediately.
+   * Execute a task: create sandbox, boot Claude Code, start manager agent.
    */
   private async executeTask(taskId: string, env: Env): Promise<void> {
     const task = await this.getTask(taskId);
@@ -623,15 +664,9 @@ export class TaskCoordinator extends DurableObject<Env> {
       };
 
       const sandboxManager = new SandboxManager(env);
-      const { sandbox } = await sandboxManager.create(payload);
+      await sandboxManager.create(payload);
 
-      // Configure sandbox: write CLAUDE.md, env vars, auto-start in .bashrc
-      // Claude Code will launch when the terminal PTY connects
-      await sandboxManager.runInteractiveAgent(sandbox, payload, async (msg) => {
-        await this.appendLog(taskId, `task-${taskId}`, msg, "info");
-      });
-
-      await this.appendLog(taskId, "", "Sandbox ready — open the Terminal tab to see Claude Code working", "info");
+      await this.appendLog(taskId, "", "Sandbox ready — starting manager agent...", "info");
 
       // Track that this sandbox is alive
       const watching = await this.ctx.storage.get<string[]>("watching_tasks") ?? [];
@@ -639,6 +674,14 @@ export class TaskCoordinator extends DurableObject<Env> {
         watching.push(taskId);
         await this.ctx.storage.put("watching_tasks", watching);
       }
+
+      // Start the manager agent (kicks off boot, returns quickly)
+      const manager = this.createManager(taskId, task, env);
+      await manager.start();
+
+      // Schedule a fast first tick to check boot progress
+      await this.ctx.storage.setAlarm(Date.now() + 5 * 1000);
+
     } catch (err) {
       console.error(`Task ${taskId} failed:`, err);
       await this.updateTask(taskId, { status: "failed", error: String(err) });
@@ -648,7 +691,68 @@ export class TaskCoordinator extends DurableObject<Env> {
     }
   }
 
+  /** Create a ManagerAgent instance for a task */
+  private createManager(taskId: string, task: Task, env: Env): ManagerAgent {
+    const sandboxId = `task-${taskId}`.toLowerCase();
+    const sandbox = getSandbox(env.Sandbox, sandboxId, { keepAlive: true });
+
+    return new ManagerAgent({
+      taskId,
+      taskDescription: task.description,
+      repoUrl: task.repoUrl,
+      branchName: task.branchName,
+      sandbox,
+      storage: this.ctx.storage,
+      env,
+      broadcastEvent: (type, data) => {
+        this.broadcast({ type, taskId, timestamp: new Date().toISOString(), data } as PhilEvent);
+      },
+      addEscalation: async (from, message) => {
+        await this.addEscalation(taskId, from, message);
+      },
+      updateTask: async (updates) => {
+        await this.updateTask(taskId, updates);
+      },
+    });
+  }
+
+  /** Handle user message — routes to manager agent */
+  async handleUserMessage(taskId: string, message: string): Promise<void> {
+    // Store the escalation
+    await this.addEscalation(taskId, "user", message);
+
+    // Route to manager if active
+    const state = await loadManagerState(this.ctx.storage, taskId);
+    if (state && state.phase !== "done" && state.phase !== "error") {
+      const task = await this.getTask(taskId);
+      if (task) {
+        const secrets = await this.resolveSecrets();
+        const env: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
+        const manager = this.createManager(taskId, task, env);
+        await manager.onUserMessage(message);
+      }
+    }
+  }
+
+  /** Handle review comments — routes to manager agent */
+  async handleReviewComments(taskId: string, reviews: ReviewComment[]): Promise<void> {
+    const state = await loadManagerState(this.ctx.storage, taskId);
+    if (state && state.phase !== "done" && state.phase !== "error") {
+      const task = await this.getTask(taskId);
+      if (task) {
+        const secrets = await this.resolveSecrets();
+        const env: Env = { ...this.env, ANTHROPIC_API_KEY: secrets.anthropicApiKey, GITHUB_TOKEN: secrets.githubToken };
+        const manager = this.createManager(taskId, task, env);
+        await manager.onReviewReceived(reviews);
+      }
+    }
+  }
+
   // --- Review Loop ---
+
+  async getManagerState(taskId: string) {
+    return loadManagerState(this.ctx.storage, taskId);
+  }
 
   async addReviewComment(
     taskId: string,

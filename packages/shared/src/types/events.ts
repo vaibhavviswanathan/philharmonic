@@ -16,6 +16,8 @@ export type EventType =
   | "review_fix_completed"
   | "escalation"
   | "escalation_response"
+  | "manager_phase_changed"
+  | "manager_thinking"
   | "error";
 
 export interface PhilEvent {

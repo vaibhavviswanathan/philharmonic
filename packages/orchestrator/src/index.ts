@@ -16,6 +16,7 @@ import {
 import type { Env } from "./env.js";
 import { TaskCoordinator } from "./state/task-do.js";
 import { SandboxManager } from "./sandbox/manager.js";
+import { ensureSandboxReady } from "./sandbox/agent.js";
 
 export { TaskCoordinator };
 
@@ -190,8 +191,43 @@ app.get("/v1/tasks/:id/events", async (c) => {
 app.get("/v1/tasks/:id/terminal", async (c) => {
   const taskId = c.req.param("id");
   const sandboxId = `task-${taskId}`.toLowerCase();
-  const sandbox = getSandbox(c.env.Sandbox, sandboxId);
-  return proxyTerminal(sandbox, taskId, c.req.raw, { cols: 120, rows: 40 });
+  const sandbox = getSandbox(c.env.Sandbox, sandboxId, { keepAlive: true });
+
+  // Look up task to get repo URL, branch, etc.
+  const coordinator = getCoordinator(c.env);
+  const task = await doRpc<Task | null>(coordinator, "getTask", taskId);
+  if (task) {
+    // Ensure startup script exists (idempotent — handles container recycle)
+    await ensureSandboxReady(sandbox, {
+      taskId,
+      branchName: task.branchName,
+      repoContext: {
+        repoUrl: task.repoUrl,
+        defaultBranch: "main",
+        projectType: "unknown",
+        structure: [],
+      },
+      subtasks: task.subtasks ?? [],
+      touchSet: task.touchSet ?? [],
+      callbackUrl: "",
+    }, c.env);
+  }
+
+  return proxyTerminal(sandbox, taskId, c.req.raw, {
+    cols: 120,
+    rows: 40,
+    shell: "/workspace/.phil-start.sh",
+  });
+});
+
+// Debug: exec a command inside the task's sandbox
+app.post("/v1/tasks/:id/exec", async (c) => {
+  const taskId = c.req.param("id");
+  const sandboxId = `task-${taskId}`.toLowerCase();
+  const sandbox = getSandbox(c.env.Sandbox, sandboxId, { keepAlive: true });
+  const { cmd } = await c.req.json<{ cmd: string }>();
+  const result = await sandbox.exec(cmd);
+  return c.json({ stdout: result.stdout, stderr: result.stderr, success: result.success });
 });
 
 app.get("/v1/tasks/:id/context", async (c) => {
@@ -476,23 +512,18 @@ app.post("/v1/tasks/:id/messages", async (c) => {
   if (!message) return c.json({ error: "message is required" }, 400);
 
   const coordinator = getCoordinator(c.env);
-  await doRpc(coordinator, "addEscalation", taskId, "user", message);
-
-  // If the task is reviewing, queue a review fix with the user's message
-  const task = await doRpc<Task | null>(coordinator, "getTask", taskId);
-  if (task && task.status === "reviewing") {
-    // Add user message as a review comment so the agent processes it
-    await doRpc(coordinator, "addReviewComment", taskId, {
-      id: `user-msg-${Date.now()}`,
-      prNumber: task.prNumber ?? 0,
-      author: "user",
-      body: message,
-      createdAt: new Date().toISOString(),
-    });
-    await doRpc(coordinator, "enqueueReviewFix", taskId);
-  }
+  // Route through the manager agent (which also stores the escalation)
+  await doRpc(coordinator, "handleUserMessage", taskId, message);
 
   return c.json({ ok: true });
+});
+
+// Manager agent status
+app.get("/v1/tasks/:id/manager-status", async (c) => {
+  const taskId = c.req.param("id");
+  const coordinator = getCoordinator(c.env);
+  const state = await doRpc(coordinator, "getManagerState", taskId);
+  return c.json(state ?? { phase: null });
 });
 
 app.get("/v1/tasks/:id/messages", async (c) => {

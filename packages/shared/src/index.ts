@@ -12,6 +12,8 @@ export type { Project } from "./types/project.js";
 
 export type { Sandbox, SandboxState } from "./types/sandbox.js";
 
+export type { ManagerPhase, ManagerState } from "./types/manager.js";
+
 export type {
   DispatchPayload,
   RepoContext,
