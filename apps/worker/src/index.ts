@@ -17,9 +17,12 @@ import { runsRoute } from './api/runs';
 import { internalRoute } from './api/internal';
 import { wsRoute } from './api/ws';
 import { accessAuthMiddleware } from './api/auth';
+import { handleDispatchQueue } from './queue/consumer';
+import type { DispatchMessage } from './do/Orchestrator';
 import type { Env, Variables } from './lib/types';
 
 export { TasksRoom } from './do/TasksRoom';
+export { Orchestrator } from './do/Orchestrator';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -48,4 +51,7 @@ app.onError((err, c) => {
   return c.json({ error: { code: 'internal_error', message: 'Unexpected error' } }, 500);
 });
 
-export default app satisfies ExportedHandler<Env>;
+export default {
+  fetch: app.fetch,
+  queue: (batch, env) => handleDispatchQueue(batch, env),
+} satisfies ExportedHandler<Env, DispatchMessage>;
