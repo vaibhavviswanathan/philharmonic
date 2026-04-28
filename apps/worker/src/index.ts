@@ -23,6 +23,8 @@ import type { Env, Variables } from './lib/types';
 
 export { TasksRoom } from './do/TasksRoom';
 export { Orchestrator } from './do/Orchestrator';
+export { Sandbox } from './sandbox/Sandbox';
+export { ImplementationRun } from './workflow/ImplementationRun';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 

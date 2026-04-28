@@ -3,6 +3,8 @@
  * wrangler.jsonc; keep them in sync. See SPEC §16.
  */
 
+import type { Sandbox as CFSandbox } from '@cloudflare/sandbox';
+
 export interface Env {
   ASSETS: Fetcher;
 
@@ -12,6 +14,8 @@ export interface Env {
 
   TASKS_ROOM: DurableObjectNamespace;
   ORCHESTRATOR: DurableObjectNamespace;
+  Sandbox: DurableObjectNamespace<CFSandbox>;
+  RUN: Workflow;
 
   ANTHROPIC_API_KEY: SecretsStoreSecret;
   GITHUB_TOKEN: SecretsStoreSecret;

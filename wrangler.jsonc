@@ -102,7 +102,8 @@
   "durable_objects": {
     "bindings": [
       { "name": "TASKS_ROOM", "class_name": "TasksRoom" },
-      { "name": "ORCHESTRATOR", "class_name": "Orchestrator" }
+      { "name": "ORCHESTRATOR", "class_name": "Orchestrator" },
+      { "name": "Sandbox", "class_name": "Sandbox" }
     ]
   },
 
@@ -114,26 +115,26 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["Orchestrator"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["Sandbox"]
+    }
+  ],
+
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./containers/sandbox/Dockerfile",
+      "instance_type": "standard"
+    }
+  ],
+
+  "workflows": [
+    {
+      "name": "implementation-run",
+      "binding": "RUN",
+      "class_name": "ImplementationRun"
     }
   ]
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // M5 — append a migration tag v3 with new_sqlite_classes: ["Sandbox"], add the
-  //      Sandbox binding, and uncomment containers + workflows below.
-  //
-  //   "containers": [
-  //     {
-  //       "class_name": "Sandbox",
-  //       "image": "./containers/sandbox/Dockerfile",
-  //       "instance_type": "standard"
-  //     }
-  //   ],
-  //   "workflows": [
-  //     {
-  //       "name": "implementation-run",
-  //       "binding": "RUN",
-  //       "class_name": "ImplementationRun"
-  //     }
-  //   ]
-  // ─────────────────────────────────────────────────────────────────────────────
 }
