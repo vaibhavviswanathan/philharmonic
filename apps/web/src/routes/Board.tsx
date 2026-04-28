@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useBoard, useProjects } from '../lib/store';
 import { Column } from '../components/Column';
@@ -6,13 +6,35 @@ import { NewTaskModal } from '../components/NewTaskModal';
 import { connectProjectStream } from '../lib/ws';
 import type { TaskStatus } from '../lib/api';
 
-const COLUMNS: TaskStatus[] = ['backlog', 'blocked', 'ready', 'running', 'review', 'done'];
+const HIDE_BLOCKED_KEY = 'philharmonic:hideBlocked';
+
+const ALL_COLUMNS: TaskStatus[] = ['backlog', 'blocked', 'ready', 'running', 'review', 'done'];
 
 export function Board() {
   const { slug } = useParams();
   const { bySlug, loaded: projectsLoaded, load: loadProjects } = useProjects();
   const { tasks, projectId, loaded, load } = useBoard();
   const [showModal, setShowModal] = useState(false);
+  const [hideBlocked, setHideBlocked] = useState(() =>
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem(HIDE_BLOCKED_KEY) !== '0'
+      : true,
+  );
+
+  function toggleHideBlocked() {
+    const next = !hideBlocked;
+    setHideBlocked(next);
+    try {
+      localStorage.setItem(HIDE_BLOCKED_KEY, next ? '1' : '0');
+    } catch {
+      /* noop */
+    }
+  }
+
+  const COLUMNS = useMemo(
+    () => (hideBlocked ? ALL_COLUMNS.filter((s) => s !== 'blocked') : ALL_COLUMNS),
+    [hideBlocked],
+  );
 
   useEffect(() => {
     if (!projectsLoaded) void loadProjects();
@@ -63,15 +85,19 @@ export function Board() {
     cancelled: [],
   };
   for (const t of Object.values(tasks)) tasksByStatus[t.status].push(t);
-  for (const status of COLUMNS) {
+  for (const status of ALL_COLUMNS) {
     tasksByStatus[status].sort((a, b) => a.priority - b.priority || b.createdAt - a.createdAt);
   }
+  const blockedCount = tasksByStatus.blocked.length;
 
   return (
     <section className="page">
       <header className="page-header">
         <h1>{project.name}</h1>
         <div className="board-actions">
+          <button onClick={toggleHideBlocked} className="ghost small">
+            {hideBlocked ? `Show blocked (${blockedCount})` : 'Hide blocked'}
+          </button>
           <Link to={`/projects/${project.slug}/settings`} className="ghost">
             Settings
           </Link>
