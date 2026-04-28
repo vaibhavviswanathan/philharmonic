@@ -151,73 +151,17 @@ export class Orchestrator extends DurableObject<Env> {
       });
     }
 
-    // M4 stub: mark the run succeeded immediately so the pipeline closes.
-    // M5 replaces this with `await env.RUN.create(...)`.
-    await this.completeRunStub(runId, task.id, project.id);
-
-    return { taskId: msg.taskId, outcome: 'claimed', runId };
-  }
-
-  private async completeRunStub(
-    runId: string,
-    taskId: string,
-    projectId: string,
-  ): Promise<void> {
-    const db = getDb(this.env.DB);
-    const now = new Date();
+    // M5+: hand off to the durable ImplementationRun Workflow.
+    const instance = await this.env.RUN.create({
+      id: runId,
+      params: { runId, taskId: task.id, projectId: project.id },
+    });
     await db
       .update(schema.runs)
-      .set({
-        status: 'succeeded',
-        startedAt: now,
-        endedAt: now,
-      })
+      .set({ workflowInstanceId: instance.id })
       .where(eq(schema.runs.id, runId));
-    await db
-      .update(schema.tasks)
-      .set({ status: 'review', updatedAt: now })
-      .where(eq(schema.tasks.id, taskId));
-    await db.insert(schema.events).values({
-      id: ulid(),
-      taskId,
-      runId,
-      type: 'system',
-      author: 'system',
-      payload: { message: 'M4 stub: would have run agent here.' },
-      createdAt: now,
-    });
-    await db.insert(schema.events).values({
-      id: ulid(),
-      taskId,
-      runId,
-      type: 'status_change',
-      author: 'system',
-      payload: { from: 'running', to: 'review' },
-      createdAt: now,
-    });
 
-    const finalTask = await db
-      .select()
-      .from(schema.tasks)
-      .where(eq(schema.tasks.id, taskId))
-      .get();
-    const finalRun = await db
-      .select()
-      .from(schema.runs)
-      .where(eq(schema.runs.id, runId))
-      .get();
-    if (finalTask) {
-      await safeBroadcast(this.env, projectId, {
-        type: 'task.updated',
-        task: taskDto(finalTask),
-      });
-    }
-    if (finalRun) {
-      await safeBroadcast(this.env, projectId, {
-        type: 'run.updated',
-        run: runDto(finalRun),
-      });
-    }
+    return { taskId: msg.taskId, outcome: 'claimed', runId };
   }
 
   private async ensureAlarm(): Promise<void> {

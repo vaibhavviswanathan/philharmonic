@@ -1,13 +1,13 @@
 # Philharmonic sandbox container — base image for every per-task workspace.
 #
-# Each running task lands in a fresh instance of this image with /workspace mounted
-# empty; the Workflow checks out the repo into /workspace and writes prompt + run
-# token + MCP config into /workspace/.philharmonic/. See SPEC §13.
+# Extends @cloudflare/sandbox's runtime image so the SDK's control plane
+# (sandbox.exec, file I/O, port exposure, sessions) works out of the box.
+# The Workflow checks out the repo into /workspace and runs `claude -p` in M6+.
 #
-# Wired into wrangler.jsonc `containers` binding starting at M5. M0 ships the
-# image source so the Deploy button has a buildable image once enabled.
+# When @cloudflare/sandbox is bumped in apps/worker/package.json, bump this
+# image tag too — they must match for the wire protocol to line up.
 
-FROM node:22-bookworm-slim
+FROM docker.io/cloudflare/sandbox:0.5.6
 
 # System tools the agent uses for repo operations and shell work.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,9 +29,4 @@ RUN npm install -g @anthropic-ai/claude-code
 #   WORKDIR /opt/tasks-mcp
 #   RUN npm ci && npm run build
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
 WORKDIR /workspace
-ENV PATH="/usr/local/bin:${PATH}"
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
