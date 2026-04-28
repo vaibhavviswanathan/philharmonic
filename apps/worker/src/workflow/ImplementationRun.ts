@@ -101,9 +101,20 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
       await sandbox.exec(`chmod 600 ${WORKDIR_META}/run-token`);
       await sandbox.writeFile(`${WORKDIR_META}/mcp.json`, JSON.stringify(mcpConfig, null, 2));
 
-      // Repo clone happens here in M7+ once the egress proxy injects the
-      // GitHub token. For M6 the agent runs against an empty workspace and
-      // just exercises read_task/post_comment/update_status.
+      // Clone the repo into /workspace. Egress proxy injects GITHUB_TOKEN
+      // (SPEC §15) so the URL doesn't need a credential.
+      const branch = `philharmonic/phil-${task.number}`;
+      await sandbox.exec(
+        `git clone --depth 50 --branch ${project.defaultBranch} ${project.repoUrl} ${PHILHARMONIC_DIR}/repo`,
+      );
+      await sandbox.exec(
+        `git -C ${PHILHARMONIC_DIR}/repo config user.email "agent@philharmonic.local"`,
+      );
+      await sandbox.exec(
+        `git -C ${PHILHARMONIC_DIR}/repo config user.name "Philharmonic Agent"`,
+      );
+      await sandbox.exec(`git -C ${PHILHARMONIC_DIR}/repo checkout -b ${branch}`);
+      await sandbox.writeFile(`${WORKDIR_META}/branch`, branch);
     });
 
     try {
@@ -158,15 +169,56 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
         },
       );
 
-      // M7 land step (gh pr create + proof) — placeholder transition for now.
-      await step.do('land', async () => {
-        const db = getDb(this.env.DB);
-        await db
-          .update(schema.runs)
-          .set({ status: 'landing' })
-          .where(eq(schema.runs.id, runId));
-        await this.broadcastRun(runId, projectId);
-      });
+      // Land step: capture the PR the agent opened, attach diff + proof.
+      await step.do(
+        'land',
+        { retries: { limit: 2, delay: '15 seconds' } },
+        async () => {
+          const db = getDb(this.env.DB);
+          await db
+            .update(schema.runs)
+            .set({ status: 'landing' })
+            .where(eq(schema.runs.id, runId));
+          await this.broadcastRun(runId, projectId);
+
+          const sandbox = getSandbox(this.env.Sandbox, taskId);
+          const branchRead = await sandbox.exec(`cat ${WORKDIR_META}/branch`).catch(() => null);
+          const branch = branchRead?.stdout?.trim() || '';
+          if (!branch) return; // agent never set up the branch — nothing to land
+
+          // Look up the PR the agent created via `gh`.
+          const prResult = await sandbox.exec(
+            `cd ${PHILHARMONIC_DIR}/repo && gh pr list --head ${branch} --json url --jq '.[0].url' 2>/dev/null || true`,
+          );
+          const prUrl = prResult.stdout?.trim();
+          if (prUrl && prUrl.startsWith('http')) {
+            await db
+              .update(schema.runs)
+              .set({ prUrl })
+              .where(eq(schema.runs.id, runId));
+          }
+
+          // Capture a unified diff against the default branch as proof of work.
+          const diffResult = await sandbox.exec(
+            `cd ${PHILHARMONIC_DIR}/repo && git diff origin/HEAD...HEAD 2>/dev/null | head -c 1000000`,
+          );
+          const diff = diffResult.stdout ?? '';
+          if (diff.trim().length > 0) {
+            const r2Key = `runs/${runId}/diff.patch`;
+            await this.env.ARTIFACTS.put(r2Key, diff);
+            await db.insert(schema.artifacts).values({
+              id: ulid(),
+              runId,
+              kind: 'pr_diff',
+              r2Key,
+              mime: 'text/x-diff',
+              sizeBytes: diff.length,
+              caption: prUrl ? `Diff for ${prUrl}` : 'Working tree diff',
+              createdAt: new Date(),
+            });
+          }
+        },
+      );
 
       await step.do('finish', async () => {
         const db = getDb(this.env.DB);

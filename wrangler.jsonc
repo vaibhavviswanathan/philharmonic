@@ -127,6 +127,12 @@
       "class_name": "Sandbox",
       "image": "./containers/sandbox/Dockerfile",
       "instance_type": "standard"
+      // M7: route every container outbound HTTP through the egress proxy
+      // Worker so secrets get injected at the network edge, never in
+      // container env. Deploy that Worker first:
+      //   wrangler deploy --config apps/worker/wrangler.outbound.jsonc
+      // then uncomment:
+      // ,"global_outbound": { "service": "philharmonic-outbound" }
     }
   ],
 
