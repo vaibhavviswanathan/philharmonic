@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, type EventDto, type RunDto, type TaskDto, type TaskStatus } from '../lib/api';
+import { api, type ArtifactDto, type EventDto, type RunDto, type TaskDto, type TaskStatus } from '../lib/api';
 import { useBoard, useProjects } from '../lib/store';
 
 const STATUS_ACTIONS: Partial<Record<TaskStatus, { label: string; to: TaskStatus }[]>> = {
@@ -19,6 +19,7 @@ export function TaskDetail() {
 
   const [task, setTask] = useState<TaskDto | null>(null);
   const [latestRun, setLatestRun] = useState<RunDto | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactDto[]>([]);
   const [events, setEvents] = useState<EventDto[]>([]);
   const [comment, setComment] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +43,14 @@ export function TaskDetail() {
         setTask(found);
         const detail = await api.getTask(found.id);
         setLatestRun(detail.latestRun);
+        if (detail.latestRun) {
+          try {
+            const runDetail = await api.getRun(detail.latestRun.id);
+            setArtifacts(runDetail.artifacts);
+          } catch {
+            /* artifacts are best-effort */
+          }
+        }
         const ev = await api.listEvents(found.id);
         setEvents(ev.events);
       } catch (err) {
@@ -119,6 +128,27 @@ export function TaskDetail() {
           ) : null}
         </div>
       </header>
+
+      {artifacts.length > 0 ? (
+        <section className="proof">
+          <h2>Proof of work</h2>
+          <ul>
+            {artifacts.map((a) => (
+              <li key={a.id}>
+                <a
+                  href={api.artifactUrl(latestRun!.id, a.id)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <span className={`artifact-kind kind-${a.kind}`}>{a.kind}</span>{' '}
+                  {a.caption ?? a.r2Key.split('/').pop() ?? 'artifact'}
+                  <span className="muted"> · {Math.ceil(a.sizeBytes / 1024)} KB</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {task.description ? (
         <section className="task-body">

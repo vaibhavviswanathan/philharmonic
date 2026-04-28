@@ -147,6 +147,27 @@ export const api = {
   listRuns: (id: string) => request<{ runs: RunDto[] }>(`/api/tasks/${id}/runs`),
 
   getRun: (id: string) =>
-    request<{ run: RunDto; artifacts: unknown[] }>(`/api/runs/${id}`),
+    request<{ run: RunDto; artifacts: ArtifactDto[] }>(`/api/runs/${id}`),
   cancelRun: (id: string) => request<{ ok: true }>(`/api/runs/${id}/cancel`, json({})),
+  artifactUrl: (runId: string, artifactId: string) =>
+    `/api/runs/${runId}/artifacts/${artifactId}`,
 };
+
+export type ArtifactKind =
+  | 'pr_diff'
+  | 'screenshot'
+  | 'video'
+  | 'logs'
+  | 'ci_summary'
+  | 'other';
+
+export interface ArtifactDto {
+  id: string;
+  runId: string;
+  kind: ArtifactKind;
+  r2Key: string;
+  mime: string;
+  sizeBytes: number;
+  caption: string | null;
+  createdAt: number;
+}

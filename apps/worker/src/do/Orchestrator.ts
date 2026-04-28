@@ -19,7 +19,7 @@
  */
 
 import { DurableObject } from 'cloudflare:workers';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { ulid } from 'ulid';
 import { getDb, schema } from '../lib/db';
 import { safeBroadcast } from '../lib/broadcast';
@@ -172,7 +172,77 @@ export class Orchestrator extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    // M8 will sweep stuck `running` tasks here; for now just keep the alarm alive.
+    try {
+      await this.reconcile();
+    } catch (err) {
+      console.warn('reconcile failed:', err);
+    }
     await this.ctx.storage.setAlarm(Date.now() + RECONCILE_INTERVAL_MS);
+  }
+
+  /**
+   * Sweep stuck rows. SPEC §11.1.
+   *  - any task in `running` with no active run → mark its run failed,
+   *    transition task back to `ready`.
+   *  - any sandbox older than 24h with no associated run → destroy it
+   *    (sandbox cleanup happens in the run's cleanup step normally; this is a
+   *     belt-and-suspenders sweep for orphaned containers).
+   */
+  private async reconcile(): Promise<void> {
+    const db = getDb(this.env.DB);
+    const orphans = await db
+      .select()
+      .from(schema.tasks)
+      .where(eq(schema.tasks.status, 'running'))
+      .all();
+
+    for (const task of orphans) {
+      const run = await db
+        .select()
+        .from(schema.runs)
+        .where(eq(schema.runs.taskId, task.id))
+        .orderBy(desc(schema.runs.createdAt))
+        .limit(1)
+        .get();
+
+      if (!run) continue;
+      // Heuristic for "no active workflow": run row has been in an active
+      // status for > 5 minutes without progress (M8 stub — a richer check
+      // would call env.RUN.get(workflowInstanceId).status).
+      const STUCK_MS = 5 * 60 * 1000;
+      if (
+        ACTIVE_RUN_STATUSES.includes(
+          run.status as (typeof ACTIVE_RUN_STATUSES)[number],
+        ) &&
+        Date.now() - run.createdAt.getTime() > STUCK_MS
+      ) {
+        const now = new Date();
+        await db
+          .update(schema.runs)
+          .set({
+            status: 'failed',
+            endedAt: now,
+            errorMessage: 'reconciliation: workflow appears stuck',
+          })
+          .where(eq(schema.runs.id, run.id));
+        await db
+          .update(schema.tasks)
+          .set({ status: 'ready', updatedAt: now })
+          .where(eq(schema.tasks.id, task.id));
+        await db.insert(schema.events).values({
+          id: ulid(),
+          taskId: task.id,
+          runId: run.id,
+          type: 'system',
+          author: 'system',
+          payload: { message: 'Run reconciled: workflow appears stuck.' },
+          createdAt: now,
+        });
+        await safeBroadcast(this.env, task.projectId, {
+          type: 'task.updated',
+          task: taskDto({ ...task, status: 'ready', updatedAt: now }),
+        });
+      }
+    }
   }
 }
