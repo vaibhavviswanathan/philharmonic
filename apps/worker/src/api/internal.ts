@@ -13,6 +13,7 @@ import { getDb, schema } from '../lib/db';
 import { artifactDto, eventDto, runDto, taskDto } from '../lib/dto';
 import { safeBroadcast } from '../lib/broadcast';
 import { TransitionError, assertAllowed } from '../lib/transitions';
+import { resolveDependents } from '../lib/dependencies';
 import { readSecret, verifyRunToken, RunTokenError, type RunTokenClaims } from '../lib/runtoken';
 import type { Env, Variables as BaseVariables } from '../lib/types';
 
@@ -150,6 +151,9 @@ internalRoute.post('/status', async (c) => {
       safeBroadcast(c.env, projectId, { type: 'task.updated', task: taskDto(updated) }),
     );
   }
+  // running → review isn't terminal for dependents (the human still has to
+  // approve the PR). Resolution cascades on `done` / `cancelled`, both of
+  // which only humans can trigger.
   return c.json({ ok: true });
 });
 

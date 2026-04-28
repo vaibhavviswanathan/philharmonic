@@ -6,7 +6,7 @@
  * shapes per `type` in packages/shared/src/api-types.ts.
  */
 
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, primaryKey } from 'drizzle-orm/sqlite-core';
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -29,7 +29,7 @@ export const tasks = sqliteTable(
     title: text('title').notNull(),
     description: text('description').notNull().default(''),
     status: text('status', {
-      enum: ['backlog', 'ready', 'running', 'review', 'done', 'cancelled'],
+      enum: ['backlog', 'blocked', 'ready', 'running', 'review', 'done', 'cancelled'],
     })
       .notNull()
       .default('backlog'),
@@ -86,6 +86,29 @@ export const events = sqliteTable(
   }),
 );
 
+/**
+ * Task dependencies — `taskId` is blocked by `blockedBy`. Both reference
+ * `tasks.id` and must belong to the same project (enforced at the API layer,
+ * not the schema). Cycles are rejected at write time via DFS in
+ * lib/dependencies.ts.
+ *
+ * Resolution rule (D0 lock-in): a blocker is "resolved" when it reaches
+ * `done` or `cancelled`. Strict by default — soft deps would need a column.
+ */
+export const taskDependencies = sqliteTable(
+  'task_dependencies',
+  {
+    taskId: text('task_id').notNull().references(() => tasks.id),
+    blockedBy: text('blocked_by').notNull().references(() => tasks.id),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    createdBy: text('created_by').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.taskId, t.blockedBy] }),
+    blockedByIdx: index('task_deps_blocked_by').on(t.blockedBy),
+  }),
+);
+
 export const artifacts = sqliteTable('artifacts', {
   id: text('id').primaryKey(),
   runId: text('run_id').notNull().references(() => runs.id),
@@ -109,6 +132,8 @@ export type Event = typeof events.$inferSelect;
 export type NewEvent = typeof events.$inferInsert;
 export type Artifact = typeof artifacts.$inferSelect;
 export type NewArtifact = typeof artifacts.$inferInsert;
+export type TaskDependency = typeof taskDependencies.$inferSelect;
+export type NewTaskDependency = typeof taskDependencies.$inferInsert;
 
 export type TaskStatus = Task['status'];
 export type RunStatus = Run['status'];

@@ -16,6 +16,7 @@ export type MeResponse =
 
 export type TaskStatus =
   | 'backlog'
+  | 'blocked'
   | 'ready'
   | 'running'
   | 'review'
@@ -138,7 +139,18 @@ export const api = {
     body: { title: string; description?: string; priority?: number },
   ) => request<{ task: TaskDto }>(`/api/projects/${projectId}/tasks`, json(body)),
   getTask: (id: string) =>
-    request<{ task: TaskDto; latestRun: RunDto | null }>(`/api/tasks/${id}`),
+    request<{
+      task: TaskDto;
+      latestRun: RunDto | null;
+      blockers: TaskDto[];
+      blocking: TaskDto[];
+    }>(`/api/tasks/${id}`),
+  addDependency: (id: string, blockedBy: string) =>
+    request<{ ok: true }>(`/api/tasks/${id}/dependencies`, json({ blockedBy })),
+  removeDependency: (id: string, blockerId: string) =>
+    request<{ ok: true }>(`/api/tasks/${id}/dependencies/${blockerId}`, {
+      method: 'DELETE',
+    }),
   transitionTask: (id: string, to: TaskStatus) =>
     request<{ task: TaskDto }>(`/api/tasks/${id}/transition`, json({ to })),
   postComment: (id: string, body: string) =>

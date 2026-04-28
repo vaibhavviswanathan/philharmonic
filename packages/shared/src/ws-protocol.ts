@@ -9,6 +9,7 @@
 
 export type TaskStatus =
   | 'backlog'
+  | 'blocked'
   | 'ready'
   | 'running'
   | 'review'

@@ -6,7 +6,9 @@
  *   - 'orch'   — only the Orchestrator DO (claim → running)
  *   - 'agent'  — only a run-token holder (running → review)
  *
- * '* → cancelled' is allowed for everyone; encoded explicitly per status.
+ * `blocked` is the holding pattern for tasks with unresolved dependencies.
+ * The API normally redirects backlog/blocked → ready into the `blocked` lane
+ * when a blocker is unresolved (lib/dependencies.ts gateReadyTransition).
  */
 
 import type { TaskStatus } from './schema';
@@ -16,10 +18,17 @@ export type Actor = 'human' | 'orch' | 'agent';
 const RULES: Record<TaskStatus, Partial<Record<TaskStatus, Actor>>> = {
   backlog: {
     ready: 'human',
+    blocked: 'human', // adding a blocker forces this
+    cancelled: 'human',
+  },
+  blocked: {
+    backlog: 'human',
+    ready: 'human', // manual override; system uses this path on cascade unblock
     cancelled: 'human',
   },
   ready: {
     backlog: 'human',
+    blocked: 'human', // adding a new blocker
     running: 'orch',
     cancelled: 'human',
   },

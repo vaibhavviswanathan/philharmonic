@@ -5,6 +5,7 @@ import type { TaskDto, TaskStatus } from '../lib/api';
 
 const TITLES: Record<TaskStatus, string> = {
   backlog: 'Backlog',
+  blocked: 'Blocked',
   ready: 'Ready',
   running: 'Running',
   review: 'Review',
