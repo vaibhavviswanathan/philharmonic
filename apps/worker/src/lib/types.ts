@@ -11,6 +11,7 @@ export interface Env {
   DISPATCH: Queue;
 
   TASKS_ROOM: DurableObjectNamespace;
+  ORCHESTRATOR: DurableObjectNamespace;
 
   ANTHROPIC_API_KEY: SecretsStoreSecret;
   GITHUB_TOKEN: SecretsStoreSecret;

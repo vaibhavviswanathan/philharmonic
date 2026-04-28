@@ -101,7 +101,8 @@
   // M5 (sandbox + agent): adds Sandbox class + container + Workflow + tag v3.
   "durable_objects": {
     "bindings": [
-      { "name": "TASKS_ROOM", "class_name": "TasksRoom" }
+      { "name": "TASKS_ROOM", "class_name": "TasksRoom" },
+      { "name": "ORCHESTRATOR", "class_name": "Orchestrator" }
     ]
   },
 
@@ -109,13 +110,14 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TasksRoom"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["Orchestrator"]
     }
   ]
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // M4 — append a migration tag v2 with new_sqlite_classes: ["Orchestrator"] and
-  //      add the ORCHESTRATOR binding here.
-  //
   // M5 — append a migration tag v3 with new_sqlite_classes: ["Sandbox"], add the
   //      Sandbox binding, and uncomment containers + workflows below.
   //
