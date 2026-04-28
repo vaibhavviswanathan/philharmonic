@@ -1,16 +1,18 @@
 /**
- * ImplementationRun — durable Workflow that owns a single agent run.
+ * ImplementationRun — durable Workflow that owns a single agent run. SPEC §12.
  *
  * Steps:
- *   1. prepare   — load task/project, mark run preparing, broadcast.
- *   2. runAgent  — invoke the agent inside the sandbox; M5 stub runs
- *                  `echo "hello from $(hostname)"` and streams stdout to the
- *                  TasksRoom DO as run.log frames. M6 swaps in the Claude CLI.
- *   3. land      — open PR, attach proof of work; M7.
- *   4. cleanup   — destroy sandbox, finalize run row, broadcast.
+ *   prepare   — load task/project, mint run token, render WORKFLOW.md, write
+ *               .philharmonic/{prompt.md, run-token, mcp.json} into the sandbox.
+ *   runAgent  — `claude -p` against the prompt with the philharmonic MCP server
+ *               and stream stdout back to the SPA via run.log frames.
+ *   land      — open PR + attach proof of work (M7).
+ *   finish    — mark run succeeded; transition task to review if it isn't already
+ *               (the agent moves the task itself via philharmonic.update_status,
+ *               so finish is a fallback).
+ *   cleanup   — destroy the sandbox in a finally block.
  *
- * Each `step.do` body must be idempotent — Workflows replay on resume.
- * See SPEC §12.
+ * Every step.do body must be idempotent — Workflows replay on resume.
  */
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
@@ -20,6 +22,8 @@ import { ulid } from 'ulid';
 import { getDb, schema } from '../lib/db';
 import { runDto, taskDto } from '../lib/dto';
 import { safeBroadcast } from '../lib/broadcast';
+import { mintRunToken, readSecret } from '../lib/runtoken';
+import { renderWorkflowMd } from '../lib/workflowmd';
 import type { Env } from '../lib/types';
 
 export interface ImplementationRunParams {
@@ -28,7 +32,9 @@ export interface ImplementationRunParams {
   projectId: string;
 }
 
-const LOG_BATCH_SIZE = 10;
+const PRIORITY_LABEL = ['urgent', 'high', 'normal', 'low'] as const;
+const WORKDIR_META = '/workspace/.philharmonic';
+const PHILHARMONIC_DIR = '/workspace';
 
 export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRunParams> {
   override async run(
@@ -39,13 +45,65 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
 
     await step.do('prepare', async () => {
       const db = getDb(this.env.DB);
+      const [task, project] = await Promise.all([
+        db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get(),
+        db.select().from(schema.projects).where(eq(schema.projects.id, projectId)).get(),
+      ]);
+      if (!task || !project) throw new Error(`task or project missing for run ${runId}`);
+
       const now = new Date();
       await db
         .update(schema.runs)
         .set({ status: 'preparing', startedAt: now })
         .where(eq(schema.runs.id, runId));
       await this.broadcastRun(runId, projectId);
-      // M6 — also: gitCheckout into /workspace, write .philharmonic/{prompt.md, run-token, mcp.json}
+
+      // Mint a run token (24h ttl).
+      const secret = await readSecret(this.env.RUN_TOKEN_SECRET);
+      const token = await mintRunToken({ runId, taskId, projectId }, secret);
+
+      // Render the per-project WORKFLOW.md prompt.
+      const prompt = renderWorkflowMd(project.workflowMd, {
+        project: {
+          name: project.name,
+          repoUrl: project.repoUrl,
+          defaultBranch: project.defaultBranch,
+        },
+        task: {
+          identifier: `PHIL-${task.number}`,
+          title: task.title,
+          description: task.description,
+          priority: PRIORITY_LABEL[task.priority] ?? 'normal',
+          createdBy: task.createdBy,
+          createdAt: task.createdAt.toISOString(),
+        },
+        run: { id: runId, attempt: 1 },
+      });
+
+      const apiBase = this.env.API_BASE || 'http://host.docker.internal:8787';
+      const mcpConfig = {
+        mcpServers: {
+          philharmonic: {
+            command: 'node',
+            args: ['/opt/tasks-mcp/dist/index.js'],
+            env: {
+              PHILHARMONIC_API_BASE: apiBase,
+              PHILHARMONIC_RUN_TOKEN_FILE: `${WORKDIR_META}/run-token`,
+            },
+          },
+        },
+      };
+
+      const sandbox = getSandbox(this.env.Sandbox, taskId);
+      await sandbox.exec(`mkdir -p ${WORKDIR_META}`);
+      await sandbox.writeFile(`${WORKDIR_META}/prompt.md`, prompt);
+      await sandbox.writeFile(`${WORKDIR_META}/run-token`, token);
+      await sandbox.exec(`chmod 600 ${WORKDIR_META}/run-token`);
+      await sandbox.writeFile(`${WORKDIR_META}/mcp.json`, JSON.stringify(mcpConfig, null, 2));
+
+      // Repo clone happens here in M7+ once the egress proxy injects the
+      // GitHub token. For M6 the agent runs against an empty workspace and
+      // just exercises read_task/post_comment/update_status.
     });
 
     try {
@@ -61,35 +119,46 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
           await this.broadcastRun(runId, projectId);
 
           const sandbox = getSandbox(this.env.Sandbox, taskId);
-          const result = await sandbox.exec('echo "hello from $(hostname)" && date');
+
+          const cmd = [
+            'claude',
+            '-p',
+            `"$(cat ${WORKDIR_META}/prompt.md)"`,
+            '--output-format=stream-json',
+            `--mcp-config ${WORKDIR_META}/mcp.json`,
+            '--permission-mode=acceptEdits',
+            '--max-turns 100',
+          ].join(' ');
+
+          const result = await sandbox.exec(`bash -c '${cmd.replace(/'/g, "'\\''")}'`, {
+            cwd: PHILHARMONIC_DIR,
+          });
 
           const lines = (result.stdout ?? '')
             .split('\n')
-            .filter((l) => l.trim().length > 0);
-          // Stream in batches so the run viewer feels live.
-          for (let i = 0; i < lines.length; i += LOG_BATCH_SIZE) {
-            const slice = lines.slice(i, i + LOG_BATCH_SIZE);
-            await safeBroadcast(this.env, projectId, {
-              type: 'run.log',
-              runId,
-              lines: slice,
-            });
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+
+          if (lines.length > 0) {
+            // Stream in batches; keeps run.log frames small.
+            const BATCH = 25;
+            for (let i = 0; i < lines.length; i += BATCH) {
+              await safeBroadcast(this.env, projectId, {
+                type: 'run.log',
+                runId,
+                lines: lines.slice(i, i + BATCH),
+              });
+            }
           }
 
-          // Persist the agent_action event so the activity feed survives a refresh.
-          await db.insert(schema.events).values({
-            id: ulid(),
-            taskId,
-            runId,
-            type: 'agent_action',
-            author: 'agent',
-            payload: { tool: 'echo', summary: lines.join('\n') },
-            createdAt: new Date(),
-          });
+          if (result.exitCode !== 0) {
+            const tail = (result.stderr ?? '').split('\n').slice(-20).join('\n');
+            throw new Error(`claude exited ${result.exitCode}: ${tail}`);
+          }
         },
       );
 
-      // M7 land step — open PR + attach proof. Stub for M5.
+      // M7 land step (gh pr create + proof) — placeholder transition for now.
       await step.do('land', async () => {
         const db = getDb(this.env.DB);
         await db
@@ -106,24 +175,34 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
           .update(schema.runs)
           .set({ status: 'succeeded', endedAt: now })
           .where(eq(schema.runs.id, runId));
-        await db
-          .update(schema.tasks)
-          .set({ status: 'review', updatedAt: now })
-          .where(eq(schema.tasks.id, taskId));
-        await db.insert(schema.events).values({
-          id: ulid(),
-          taskId,
-          runId,
-          type: 'status_change',
-          author: 'system',
-          payload: { from: 'running', to: 'review' },
-          createdAt: now,
-        });
+
+        // The agent should have already transitioned the task to `review` via
+        // philharmonic.update_status. If it didn't (e.g. exited early), do it
+        // here so the task doesn't get stuck in `running`.
+        const task = await db
+          .select()
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, taskId))
+          .get();
+        if (task && task.status === 'running') {
+          await db
+            .update(schema.tasks)
+            .set({ status: 'review', updatedAt: now })
+            .where(eq(schema.tasks.id, taskId));
+          await db.insert(schema.events).values({
+            id: ulid(),
+            taskId,
+            runId,
+            type: 'status_change',
+            author: 'system',
+            payload: { from: 'running', to: 'review', reason: 'workflow_finalized' },
+            createdAt: now,
+          });
+        }
         await this.broadcastRun(runId, projectId);
         await this.broadcastTask(taskId, projectId);
       });
     } catch (err) {
-      // Failure path: mark run failed, return task to ready.
       await step.do('mark-failed', async () => {
         const db = getDb(this.env.DB);
         const now = new Date();
