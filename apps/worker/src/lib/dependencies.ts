@@ -70,6 +70,48 @@ export async function unresolvedBlockers(db: DB, taskId: string): Promise<schema
  * project rejected) and runs DFS to reject cycles. Returns the newly inserted
  * row.
  */
+/**
+ * Agent-friendly variant: skips the running/review/done lock so an agent can
+ * declare a dependency mid-run. The MCP path enters here; humans use
+ * addDependency() with stricter checks.
+ */
+export async function addDependencyForAgent(
+  db: DB,
+  taskId: string,
+  blockerId: string,
+): Promise<schema.TaskDependency> {
+  if (taskId === blockerId) {
+    throw new DependencyError('self_reference', "A task can't block itself.");
+  }
+  const [task, blocker] = await Promise.all([
+    db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get(),
+    db.select().from(schema.tasks).where(eq(schema.tasks.id, blockerId)).get(),
+  ]);
+  if (!task) throw new DependencyError('task_not_found', `Task ${taskId} not found.`);
+  if (!blocker) throw new DependencyError('blocker_not_found', `Blocker ${blockerId} not found.`);
+  if (task.projectId !== blocker.projectId) {
+    throw new DependencyError(
+      'cross_project',
+      'Cross-project dependencies are not supported in v1.',
+    );
+  }
+  await assertNoCycle(db, taskId, blockerId);
+
+  const row: schema.NewTaskDependency = {
+    taskId,
+    blockedBy: blockerId,
+    createdAt: new Date(),
+    createdBy: 'agent',
+  };
+  const inserted = await db
+    .insert(schema.taskDependencies)
+    .values(row)
+    .onConflictDoNothing()
+    .returning();
+  // If the edge already existed, returning() yields []. Treat that as success.
+  return inserted[0] ?? row as schema.TaskDependency;
+}
+
 export async function addDependency(
   db: DB,
   taskId: string,
