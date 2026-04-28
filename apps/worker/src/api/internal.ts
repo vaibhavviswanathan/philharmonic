@@ -6,14 +6,18 @@
  */
 
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { ulid } from 'ulid';
 import { z } from 'zod';
 import { getDb, schema } from '../lib/db';
 import { artifactDto, eventDto, runDto, taskDto } from '../lib/dto';
 import { safeBroadcast } from '../lib/broadcast';
 import { TransitionError, assertAllowed } from '../lib/transitions';
-import { resolveDependents } from '../lib/dependencies';
+import {
+  DependencyError,
+  addDependencyForAgent,
+  resolveDependents,
+} from '../lib/dependencies';
 import { readSecret, verifyRunToken, RunTokenError, type RunTokenClaims } from '../lib/runtoken';
 import type { Env, Variables as BaseVariables } from '../lib/types';
 
@@ -272,6 +276,95 @@ internalRoute.put('/uploads/:uploadId', async (c) => {
     httpMetadata: { contentType },
   });
   return c.json({ ok: true, r2Key });
+});
+
+/**
+ * POST /api/internal/dependencies — agent-driven dependency declaration.
+ * Body: { blockedBy: 'PHIL-N' | taskId, reason?: string }
+ *
+ * The reference is resolved within the run token's project (cross-project
+ * blockers are rejected). On success, the current task is forced to
+ * `blocked` and the run gets logged as deferred via a system event. The
+ * agent should then post a brief comment and exit; resolveDependents will
+ * re-queue this task once the blocker hits done/cancelled.
+ */
+internalRoute.post('/dependencies', async (c) => {
+  const Body = z.object({
+    blockedBy: z.string().min(1).max(200),
+    reason: z.string().max(2000).optional(),
+  });
+  const parse = Body.safeParse(await c.req.json().catch(() => null));
+  if (!parse.success) {
+    return c.json({ error: { code: 'invalid_body', message: parse.error.message } }, 400);
+  }
+  const { taskId, projectId, runId } = c.var.runClaims;
+  const db = getDb(c.env.DB);
+
+  // Resolve `blockedBy` — accepts either a raw task id or "PHIL-N".
+  let blockerId: string | null = null;
+  const phil = parse.data.blockedBy.match(/^PHIL-(\d+)$/i);
+  if (phil) {
+    const n = Number.parseInt(phil[1]!, 10);
+    const row = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(eq(schema.tasks.projectId, projectId), eq(schema.tasks.number, n)),
+      )
+      .get();
+    if (row) blockerId = row.id;
+  } else {
+    const row = await db
+      .select({ id: schema.tasks.id, projectId: schema.tasks.projectId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, parse.data.blockedBy))
+      .get();
+    if (row && row.projectId === projectId) blockerId = row.id;
+  }
+  if (!blockerId) {
+    return c.json(
+      { error: { code: 'blocker_not_found', message: 'Blocker not found in this project.' } },
+      404,
+    );
+  }
+
+  try {
+    await addDependencyForAgent(db, taskId, blockerId);
+  } catch (err) {
+    if (err instanceof DependencyError) {
+      return c.json({ error: { code: err.code, message: err.message } }, 400);
+    }
+    throw err;
+  }
+
+  const now = new Date();
+  await db
+    .update(schema.tasks)
+    .set({ status: 'blocked', updatedAt: now })
+    .where(eq(schema.tasks.id, taskId));
+
+  await db.insert(schema.events).values({
+    id: ulid(),
+    taskId,
+    runId,
+    type: 'agent_action',
+    author: 'agent',
+    payload: {
+      tool: 'declare_dependency',
+      blockedBy: blockerId,
+      reason: parse.data.reason ?? '',
+      summary: `Declared dependency on ${parse.data.blockedBy}`,
+    },
+    createdAt: now,
+  });
+
+  const updated = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get();
+  if (updated) {
+    c.executionCtx.waitUntil(
+      safeBroadcast(c.env, projectId, { type: 'task.updated', task: taskDto(updated) }),
+    );
+  }
+  return c.json({ ok: true, blockedBy: blockerId });
 });
 
 internalRoute.post('/runs/log', async (c) => {
