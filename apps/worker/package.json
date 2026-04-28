@@ -1,0 +1,15 @@
+{
+  "name": "@philharmonic/worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "echo 'worker is bundled by wrangler at deploy time; nothing to build'",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,132 @@
+/**
+ * Philharmonic Worker — single deployable Worker that serves the SPA, the JSON API,
+ * the agent-internal API, and the WebSocket layer.
+ *
+ * This config lives at the REPO ROOT for "Deploy to Cloudflare" button compatibility.
+ * Empty resource IDs (e.g. `database_id: ""`) are filled in by the Deploy button's
+ * auto-provisioner OR by `pnpm bootstrap` (which runs scripts/bootstrap.ts).
+ *
+ * See SPEC.md §16 for the canonical configuration shape and §17 for build milestones.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "philharmonic",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Built SPA. `pnpm build` produces this directory.
+  // `run_worker_first` so the Worker handles /api/* and /ws/* before the static
+  // asset matcher; everything else delegates to ASSETS via env.ASSETS.fetch().
+  "assets": {
+    "directory": "./apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+
+  // Non-sensitive plain config. Filled in post-deploy via the PostDeploySetup screen.
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    "API_BASE": ""
+  },
+
+  // Auto-provisioned by the Deploy button or by scripts/bootstrap.ts.
+  // Empty `database_id` = "create me a new one and write it back".
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "philharmonic",
+      "database_id": "",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "ARTIFACTS",
+      "bucket_name": "philharmonic-artifacts"
+    }
+  ],
+
+  "queues": {
+    "producers": [
+      { "binding": "DISPATCH", "queue": "philharmonic-dispatch" }
+    ],
+    "consumers": [
+      {
+        "queue": "philharmonic-dispatch",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "philharmonic-dispatch-dlq"
+      }
+    ]
+  },
+
+  // Secrets the Deploy UI prompts for. The user pastes these once and they're stored
+  // in Cloudflare Secrets Store, never in the repo. Empty `store_id` is filled by
+  // the Deploy button or scripts/bootstrap.ts.
+  "secrets_store_secrets": [
+    {
+      "binding": "ANTHROPIC_API_KEY",
+      "store_id": "",
+      "secret_name": "ANTHROPIC_API_KEY"
+    },
+    {
+      "binding": "GITHUB_TOKEN",
+      "store_id": "",
+      "secret_name": "GITHUB_TOKEN"
+    },
+    {
+      "binding": "RUN_TOKEN_SECRET",
+      "store_id": "",
+      "secret_name": "RUN_TOKEN_SECRET"
+    },
+    {
+      "binding": "INTERNAL_API_TOKEN",
+      "store_id": "",
+      "secret_name": "INTERNAL_API_TOKEN"
+    }
+  ],
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // M3+ (real-time): TasksRoom Durable Object — added in M3 per SPEC §17.
+  // M4+ (orchestration): Orchestrator Durable Object — added in M4.
+  // M5+ (sandbox + agent): Sandbox container, ImplementationRun Workflow — added
+  //                        in M5; references containers/sandbox/Dockerfile.
+  //
+  // When uncommenting these, also add the matching `migrations` block per SPEC §16:
+  //
+  //   "durable_objects": {
+  //     "bindings": [
+  //       { "name": "TASKS_ROOM",   "class_name": "TasksRoom"    },
+  //       { "name": "ORCHESTRATOR", "class_name": "Orchestrator" },
+  //       { "name": "Sandbox",      "class_name": "Sandbox"      }
+  //     ]
+  //   },
+  //   "migrations": [
+  //     { "tag": "v1", "new_sqlite_classes": ["TasksRoom", "Orchestrator", "Sandbox"] }
+  //   ],
+  //   "containers": [
+  //     {
+  //       "class_name": "Sandbox",
+  //       "image": "./containers/sandbox/Dockerfile",
+  //       "instance_type": "standard"
+  //     }
+  //   ],
+  //   "workflows": [
+  //     {
+  //       "name": "implementation-run",
+  //       "binding": "RUN",
+  //       "class_name": "ImplementationRun"
+  //     }
+  //   ]
+  // ─────────────────────────────────────────────────────────────────────────────
+}

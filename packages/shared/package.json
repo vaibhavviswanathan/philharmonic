@@ -1,25 +1,29 @@
 {
-  "name": "@phil/shared",
-  "version": "0.1.0",
+  "name": "@philharmonic/shared",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
+    },
+    "./ws-protocol": {
+      "types": "./dist/ws-protocol.d.ts",
+      "default": "./dist/ws-protocol.js"
+    },
+    "./api-types": {
+      "types": "./dist/api-types.d.ts",
+      "default": "./dist/api-types.js"
     }
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "dev": "tsc --watch"
-  },
-  "dependencies": {
-    "zod": "^3.23.0"
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.5.0"
+    "typescript": "^5.7.0"
   }
 }
