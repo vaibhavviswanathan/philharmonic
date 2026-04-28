@@ -24,9 +24,12 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Headless Claude CLI runtime — the agent's brain.
 RUN npm install -g @anthropic-ai/claude-code
 
-# M6: pre-install Tasks MCP server (containers/sandbox/mcp/tasks-mcp).
-#   COPY mcp/tasks-mcp /opt/tasks-mcp
-#   WORKDIR /opt/tasks-mcp
-#   RUN npm ci && npm run build
+# Pre-install the Tasks MCP server. SPEC §14 — exposes philharmonic.* tools
+# (read_task, post_comment, update_status, add_proof_of_work, read_workflow_md)
+# to the in-sandbox agent over stdio.
+COPY mcp/tasks-mcp /opt/tasks-mcp
+WORKDIR /opt/tasks-mcp
+# `tsc` is a devDependency, so install all deps to build, then prune.
+RUN npm install --no-fund --no-audit && npm run build && npm prune --omit=dev
 
 WORKDIR /workspace
