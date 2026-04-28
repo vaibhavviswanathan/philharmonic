@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useBoard, useProjects } from '../lib/store';
 import { Column } from '../components/Column';
 import { NewTaskModal } from '../components/NewTaskModal';
+import { connectProjectStream } from '../lib/ws';
 import type { TaskStatus } from '../lib/api';
 
 const COLUMNS: TaskStatus[] = ['backlog', 'ready', 'running', 'review', 'done'];
@@ -24,6 +25,16 @@ export function Board() {
       void load(project.id);
     }
   }, [project, projectId, load]);
+
+  useEffect(() => {
+    if (!project) return;
+    const apply = useBoard.getState().applyWsMessage;
+    const conn = connectProjectStream(project.slug, apply, () => {
+      // On reconnect, refetch tasks so we don't miss messages from the gap.
+      void useBoard.getState().load(project.id);
+    });
+    return () => conn.close();
+  }, [project]);
 
   if (!project) {
     if (projectsLoaded) {

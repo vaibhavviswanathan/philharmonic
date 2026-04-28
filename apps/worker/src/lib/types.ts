@@ -10,6 +10,8 @@ export interface Env {
   ARTIFACTS: R2Bucket;
   DISPATCH: Queue;
 
+  TASKS_ROOM: DurableObjectNamespace;
+
   ANTHROPIC_API_KEY: SecretsStoreSecret;
   GITHUB_TOKEN: SecretsStoreSecret;
   RUN_TOKEN_SECRET: SecretsStoreSecret;

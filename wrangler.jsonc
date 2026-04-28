@@ -94,26 +94,31 @@
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
-  }
+  },
+
+  // M3 (real-time): TasksRoom Durable Object fans out live updates per project.
+  // M4 (orchestration): adds Orchestrator binding + migration tag v2.
+  // M5 (sandbox + agent): adds Sandbox class + container + Workflow + tag v3.
+  "durable_objects": {
+    "bindings": [
+      { "name": "TASKS_ROOM", "class_name": "TasksRoom" }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TasksRoom"]
+    }
+  ]
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // M3+ (real-time): TasksRoom Durable Object — added in M3 per SPEC §17.
-  // M4+ (orchestration): Orchestrator Durable Object — added in M4.
-  // M5+ (sandbox + agent): Sandbox container, ImplementationRun Workflow — added
-  //                        in M5; references containers/sandbox/Dockerfile.
+  // M4 — append a migration tag v2 with new_sqlite_classes: ["Orchestrator"] and
+  //      add the ORCHESTRATOR binding here.
   //
-  // When uncommenting these, also add the matching `migrations` block per SPEC §16:
+  // M5 — append a migration tag v3 with new_sqlite_classes: ["Sandbox"], add the
+  //      Sandbox binding, and uncomment containers + workflows below.
   //
-  //   "durable_objects": {
-  //     "bindings": [
-  //       { "name": "TASKS_ROOM",   "class_name": "TasksRoom"    },
-  //       { "name": "ORCHESTRATOR", "class_name": "Orchestrator" },
-  //       { "name": "Sandbox",      "class_name": "Sandbox"      }
-  //     ]
-  //   },
-  //   "migrations": [
-  //     { "tag": "v1", "new_sqlite_classes": ["TasksRoom", "Orchestrator", "Sandbox"] }
-  //   ],
   //   "containers": [
   //     {
   //       "class_name": "Sandbox",

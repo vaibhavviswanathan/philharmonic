@@ -10,6 +10,7 @@
     "drizzle:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@philharmonic/shared": "workspace:*",
     "drizzle-orm": "^0.36.4",
     "hono": "^4.6.10",
     "jose": "^5.9.6",

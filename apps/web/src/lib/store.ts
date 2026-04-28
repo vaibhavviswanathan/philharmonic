@@ -8,7 +8,8 @@
  */
 
 import { create } from 'zustand';
-import { api, type MeResponse, type ProjectDto, type TaskDto, type TaskStatus } from './api';
+import type { ServerMessage } from '@philharmonic/shared';
+import { api, type EventDto, type MeResponse, type ProjectDto, type RunDto, type TaskDto, type TaskStatus } from './api';
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -83,10 +84,16 @@ export const useProjects = create<ProjectsStore>((set, get) => ({
 interface BoardStore {
   projectId: string | null;
   tasks: Record<string, TaskDto>;
+  runs: Record<string, RunDto>;
+  events: Record<string, EventDto[]>; // keyed by taskId
   loaded: boolean;
   load: (projectId: string) => Promise<void>;
   upsertTask: (t: TaskDto) => void;
   removeTask: (id: string) => void;
+  upsertRun: (r: RunDto) => void;
+  appendEvent: (taskId: string, e: EventDto) => void;
+  /** Apply an incoming WebSocket message. */
+  applyWsMessage: (m: ServerMessage) => void;
   /** Optimistic transition; rolls back on error. */
   transition: (taskId: string, to: TaskStatus) => Promise<void>;
 }
@@ -94,10 +101,12 @@ interface BoardStore {
 export const useBoard = create<BoardStore>((set, get) => ({
   projectId: null,
   tasks: {},
+  runs: {},
+  events: {},
   loaded: false,
 
   load: async (projectId: string) => {
-    set({ projectId, loaded: false, tasks: {} });
+    set({ projectId, loaded: false, tasks: {}, runs: {}, events: {} });
     const { tasks } = await api.listTasks(projectId);
     const next: Record<string, TaskDto> = {};
     for (const t of tasks) next[t.id] = t;
@@ -109,6 +118,35 @@ export const useBoard = create<BoardStore>((set, get) => ({
     const next = { ...get().tasks };
     delete next[id];
     set({ tasks: next });
+  },
+  upsertRun: (r) => set({ runs: { ...get().runs, [r.id]: r } }),
+  appendEvent: (taskId, e) => {
+    const existing = get().events[taskId] ?? [];
+    set({ events: { ...get().events, [taskId]: [e, ...existing] } });
+  },
+
+  applyWsMessage: (m) => {
+    switch (m.type) {
+      case 'task.created':
+      case 'task.updated':
+        get().upsertTask(m.task as unknown as TaskDto);
+        break;
+      case 'task.deleted':
+        get().removeTask(m.taskId);
+        break;
+      case 'event.created':
+        get().appendEvent(m.taskId, m.event as unknown as EventDto);
+        break;
+      case 'run.created':
+      case 'run.updated':
+        get().upsertRun(m.run as unknown as RunDto);
+        break;
+      case 'run.log':
+      case 'hello':
+      case 'pong':
+        // run.log handled by RunViewer; hello/pong are housekeeping
+        break;
+    }
   },
 
   transition: async (taskId, to) => {
