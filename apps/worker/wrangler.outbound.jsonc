@@ -1,0 +1,40 @@
+/**
+ * Egress proxy Worker — separately deployed.
+ *
+ *   wrangler deploy --config apps/worker/wrangler.outbound.jsonc
+ *
+ * Inject GITHUB_TOKEN / ANTHROPIC_API_KEY at the network edge so the agent's
+ * container never sees the secret values. SPEC §15.
+ */
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "philharmonic-outbound",
+  "main": "src/outbound/outbound.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // Set this to the main Philharmonic Worker URL after the first deploy
+    // so this proxy can recognize and pass-through Philharmonic traffic
+    // unchanged. Empty disables the recognition; harmless default.
+    "PHILHARMONIC_HOST": ""
+  },
+
+  "secrets_store_secrets": [
+    {
+      "binding": "ANTHROPIC_API_KEY",
+      "store_id": "",
+      "secret_name": "ANTHROPIC_API_KEY"
+    },
+    {
+      "binding": "GITHUB_TOKEN",
+      "store_id": "",
+      "secret_name": "GITHUB_TOKEN"
+    }
+  ],
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
