@@ -10,6 +10,7 @@ import { ulid } from 'ulid';
 import { z } from 'zod';
 import { getDb, schema } from '../lib/db';
 import { projectDto, taskDto } from '../lib/dto';
+import { safeBroadcast } from '../lib/broadcast';
 import type { Env, Variables } from '../lib/types';
 
 const DEFAULT_WORKFLOW_MD = `You are a coding agent implementing a task.
@@ -172,5 +173,7 @@ projectsRoute.post('/projects/:id/tasks', async (c) => {
     updatedAt: now,
   };
   const inserted = await db.insert(schema.tasks).values(row).returning();
-  return c.json({ task: taskDto(inserted[0]!) }, 201);
+  const dto = taskDto(inserted[0]!);
+  c.executionCtx.waitUntil(safeBroadcast(c.env, projectId, { type: 'task.created', task: dto }));
+  return c.json({ task: dto }, 201);
 });

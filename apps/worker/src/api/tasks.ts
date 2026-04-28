@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { getDb, schema } from '../lib/db';
 import { eventDto, runDto, taskDto } from '../lib/dto';
 import { TransitionError, assertAllowed } from '../lib/transitions';
+import { safeBroadcast } from '../lib/broadcast';
 import type { Env, Variables } from '../lib/types';
 
 export const tasksRoute = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -55,7 +56,9 @@ tasksRoute.patch('/tasks/:id', async (c) => {
   if (updated.length === 0) {
     return c.json({ error: { code: 'not_found', message: 'Task not found' } }, 404);
   }
-  return c.json({ task: taskDto(updated[0]!) });
+  const dto = taskDto(updated[0]!);
+  c.executionCtx.waitUntil(safeBroadcast(c.env, dto.projectId, { type: 'task.updated', task: dto }));
+  return c.json({ task: dto });
 });
 
 tasksRoute.post('/tasks/:id/transition', async (c) => {
@@ -105,7 +108,11 @@ tasksRoute.post('/tasks/:id/transition', async (c) => {
   }
 
   const updated = await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get();
-  return c.json({ task: taskDto(updated!) });
+  const dto = taskDto(updated!);
+  c.executionCtx.waitUntil(
+    safeBroadcast(c.env, dto.projectId, { type: 'task.updated', task: dto }),
+  );
+  return c.json({ task: dto });
 });
 
 tasksRoute.post('/tasks/:id/comments', async (c) => {
@@ -134,7 +141,23 @@ tasksRoute.post('/tasks/:id/comments', async (c) => {
     createdAt: new Date(),
   };
   const inserted = await db.insert(schema.events).values(event).returning();
-  return c.json({ event: eventDto(inserted[0]!) }, 201);
+  const dto = eventDto(inserted[0]!);
+  // Look up projectId for the broadcast.
+  const projectRow = await db
+    .select({ projectId: schema.tasks.projectId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, id))
+    .get();
+  if (projectRow) {
+    c.executionCtx.waitUntil(
+      safeBroadcast(c.env, projectRow.projectId, {
+        type: 'event.created',
+        taskId: id,
+        event: dto,
+      }),
+    );
+  }
+  return c.json({ event: dto }, 201);
 });
 
 tasksRoute.get('/tasks/:id/events', async (c) => {
