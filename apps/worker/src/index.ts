@@ -1,45 +1,30 @@
 /**
- * Philharmonic Worker — M0 stub.
+ * Philharmonic Worker entry — M1.
  *
- * Serves the SPA via the ASSETS binding and answers /api/* with a placeholder
- * JSON response so health checks succeed end-to-end.
- *
- * Real routes (auth, projects, tasks, runs, WS upgrade) land in M1+ per SPEC §17.
+ * Hono app with the /api/me route. Real REST routes (projects, tasks, runs,
+ * events) and the /ws upgrade land in M2/M3. Static assets fall through to
+ * the ASSETS binding so the SPA serves at every non-/api path.
  */
 
-export interface Env {
-  ASSETS: Fetcher;
+import { Hono } from 'hono';
+import { meRoute } from './api/me';
+import type { Env, Variables } from './lib/types';
 
-  // Resources — present in wrangler.jsonc, unused at M0.
-  DB: D1Database;
-  ARTIFACTS: R2Bucket;
-  DISPATCH: Queue;
+const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-  // Secrets Store bindings.
-  ANTHROPIC_API_KEY: SecretsStoreSecret;
-  GITHUB_TOKEN: SecretsStoreSecret;
-  RUN_TOKEN_SECRET: SecretsStoreSecret;
-  INTERNAL_API_TOKEN: SecretsStoreSecret;
+app.route('/api', meRoute);
 
-  // Plain vars (filled in post-deploy).
-  ACCESS_TEAM_DOMAIN: string;
-  ACCESS_AUD: string;
-  API_BASE: string;
-}
+app.notFound((c) => {
+  const url = new URL(c.req.url);
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/')) {
+    return c.json({ error: { code: 'not_found', message: 'Route not found' } }, 404);
+  }
+  return c.env.ASSETS.fetch(c.req.raw);
+});
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+app.onError((err, c) => {
+  console.error('worker error:', err);
+  return c.json({ error: { code: 'internal_error', message: 'Unexpected error' } }, 500);
+});
 
-    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/')) {
-      return Response.json({
-        ok: true,
-        name: 'philharmonic',
-        milestone: 'M0',
-        setupRequired: !env.ACCESS_AUD || !env.ACCESS_TEAM_DOMAIN,
-      });
-    }
-
-    return env.ASSETS.fetch(request);
-  },
-} satisfies ExportedHandler<Env>;
+export default app satisfies ExportedHandler<Env>;
