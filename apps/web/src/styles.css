@@ -240,7 +240,8 @@ label {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   gap: 0.75rem;
   align-items: start;
   min-height: calc(100vh - 200px);
@@ -330,6 +331,12 @@ label {
   gap: 0.5rem;
   font-size: 0.7rem;
   color: #64748b;
+}
+.task-card.is-blocked {
+  border-color: rgba(244, 114, 182, 0.4);
+}
+.task-card .task-id .lock {
+  margin-right: 0.25rem;
 }
 .task-card .priority.p-0 { color: #f87171; }
 .task-card .priority.p-1 { color: #fb923c; }
@@ -451,6 +458,82 @@ label {
 .feed .event p {
   margin: 0;
   font-size: 0.875rem;
+}
+
+/* dependencies */
+
+.dependencies {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 1rem 0 1.5rem;
+}
+.deps-col {
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+.deps-col header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.deps-col h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  color: #cbd5e1;
+}
+.dep-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.dep-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+}
+.dep-list li a {
+  flex: 1;
+  color: #e2e8f0;
+}
+.dep-list li code {
+  font-size: 0.75rem;
+  margin-right: 0.25rem;
+}
+
+.modal.dep-picker {
+  max-width: 600px;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.dep-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow-y: auto;
+  max-height: 50vh;
+}
+.dep-options li button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+button.wide {
+  width: 100%;
+  justify-content: flex-start;
 }
 
 /* run viewer */
