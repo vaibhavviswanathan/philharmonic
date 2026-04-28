@@ -1,17 +1,90 @@
-/**
- * Kanban board for a project. Empty in M1 — populated in M2 with columns:
- * Backlog · Ready · Running · Review · Done. Drag-and-drop drives status
- * transitions via /api/tasks/:id/transition.
- */
+import { useEffect, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { useBoard, useProjects } from '../lib/store';
+import { Column } from '../components/Column';
+import { NewTaskModal } from '../components/NewTaskModal';
+import type { TaskStatus } from '../lib/api';
 
-import { useParams } from 'react-router-dom';
+const COLUMNS: TaskStatus[] = ['backlog', 'ready', 'running', 'review', 'done'];
 
 export function Board() {
   const { slug } = useParams();
+  const { bySlug, loaded: projectsLoaded, load: loadProjects } = useProjects();
+  const { tasks, projectId, loaded, load } = useBoard();
+  const [showModal, setShowModal] = useState(false);
+
+  useEffect(() => {
+    if (!projectsLoaded) void loadProjects();
+  }, [projectsLoaded, loadProjects]);
+
+  const project = slug ? bySlug[slug] : undefined;
+
+  useEffect(() => {
+    if (project && projectId !== project.id) {
+      void load(project.id);
+    }
+  }, [project, projectId, load]);
+
+  if (!project) {
+    if (projectsLoaded) {
+      return (
+        <section className="page">
+          <p className="muted">
+            Project <code>{slug}</code> not found. <Link to="/projects">Back to projects</Link>
+          </p>
+        </section>
+      );
+    }
+    return (
+      <section className="page">
+        <p className="muted">Loading…</p>
+      </section>
+    );
+  }
+
+  const tasksByStatus: Record<TaskStatus, typeof tasks[string][]> = {
+    backlog: [],
+    ready: [],
+    running: [],
+    review: [],
+    done: [],
+    cancelled: [],
+  };
+  for (const t of Object.values(tasks)) tasksByStatus[t.status].push(t);
+  for (const status of COLUMNS) {
+    tasksByStatus[status].sort((a, b) => a.priority - b.priority || b.createdAt - a.createdAt);
+  }
+
   return (
     <section className="page">
-      <h1>Board · {slug}</h1>
-      <p className="muted">Kanban columns and live updates land in M2 + M3.</p>
+      <header className="page-header">
+        <h1>{project.name}</h1>
+        <div className="board-actions">
+          <Link to={`/projects/${project.slug}/settings`} className="ghost">
+            Settings
+          </Link>
+          <button onClick={() => setShowModal(true)}>+ New task</button>
+        </div>
+      </header>
+
+      {!loaded ? (
+        <p className="muted">Loading tasks…</p>
+      ) : (
+        <div className="board">
+          {COLUMNS.map((status) => (
+            <Column
+              key={status}
+              status={status}
+              tasks={tasksByStatus[status]}
+              projectSlug={project.slug}
+            />
+          ))}
+        </div>
+      )}
+
+      {showModal ? (
+        <NewTaskModal projectId={project.id} onClose={() => setShowModal(false)} />
+      ) : null}
     </section>
   );
 }

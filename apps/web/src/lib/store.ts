@@ -1,12 +1,16 @@
 /**
- * Zustand auth store. Tracks the result of `/api/me` so the app can route
- * between PostDeploySetup, the kanban board, and an error state.
+ * Zustand stores.
+ *   - useAuth     — /api/me result
+ *   - useProjects — project list, indexed by id and slug
+ *   - useBoard    — tasks for a single project, indexed by id (per-project store)
  *
- * Project / run / event stores land in M2 + M3.
+ * Real-time wiring (WebSocket → store dispatch) lands in M3.
  */
 
 import { create } from 'zustand';
-import { api, type MeResponse } from './api';
+import { api, type MeResponse, type ProjectDto, type TaskDto, type TaskStatus } from './api';
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
 
 type AuthState =
   | { status: 'loading' }
@@ -39,6 +43,85 @@ export const useAuth = create<AuthStore>((set) => ({
           message: err instanceof Error ? err.message : String(err),
         },
       });
+    }
+  },
+}));
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+
+interface ProjectsStore {
+  byId: Record<string, ProjectDto>;
+  bySlug: Record<string, ProjectDto>;
+  loaded: boolean;
+  load: () => Promise<void>;
+  upsert: (p: ProjectDto) => void;
+}
+
+export const useProjects = create<ProjectsStore>((set, get) => ({
+  byId: {},
+  bySlug: {},
+  loaded: false,
+  load: async () => {
+    const { projects } = await api.listProjects();
+    const byId: Record<string, ProjectDto> = {};
+    const bySlug: Record<string, ProjectDto> = {};
+    for (const p of projects) {
+      byId[p.id] = p;
+      bySlug[p.slug] = p;
+    }
+    set({ byId, bySlug, loaded: true });
+  },
+  upsert: (p: ProjectDto) =>
+    set({
+      byId: { ...get().byId, [p.id]: p },
+      bySlug: { ...get().bySlug, [p.slug]: p },
+    }),
+}));
+
+// ─── Board (one per project) ────────────────────────────────────────────────
+
+interface BoardStore {
+  projectId: string | null;
+  tasks: Record<string, TaskDto>;
+  loaded: boolean;
+  load: (projectId: string) => Promise<void>;
+  upsertTask: (t: TaskDto) => void;
+  removeTask: (id: string) => void;
+  /** Optimistic transition; rolls back on error. */
+  transition: (taskId: string, to: TaskStatus) => Promise<void>;
+}
+
+export const useBoard = create<BoardStore>((set, get) => ({
+  projectId: null,
+  tasks: {},
+  loaded: false,
+
+  load: async (projectId: string) => {
+    set({ projectId, loaded: false, tasks: {} });
+    const { tasks } = await api.listTasks(projectId);
+    const next: Record<string, TaskDto> = {};
+    for (const t of tasks) next[t.id] = t;
+    set({ tasks: next, loaded: true });
+  },
+
+  upsertTask: (t) => set({ tasks: { ...get().tasks, [t.id]: t } }),
+  removeTask: (id) => {
+    const next = { ...get().tasks };
+    delete next[id];
+    set({ tasks: next });
+  },
+
+  transition: async (taskId, to) => {
+    const current = get().tasks[taskId];
+    if (!current) return;
+    const previous = current.status;
+    set({ tasks: { ...get().tasks, [taskId]: { ...current, status: to } } });
+    try {
+      const { task } = await api.transitionTask(taskId, to);
+      set({ tasks: { ...get().tasks, [taskId]: task } });
+    } catch (err) {
+      set({ tasks: { ...get().tasks, [taskId]: { ...current, status: previous } } });
+      throw err;
     }
   },
 }));

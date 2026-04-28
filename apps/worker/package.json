@@ -6,14 +6,19 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "echo 'worker is bundled by wrangler at deploy time; nothing to build'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "drizzle:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "drizzle-orm": "^0.36.4",
     "hono": "^4.6.10",
-    "jose": "^5.9.6"
+    "jose": "^5.9.6",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",
+    "drizzle-kit": "^0.30.0",
     "typescript": "^5.7.0"
   }
 }
