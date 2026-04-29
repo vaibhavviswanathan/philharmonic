@@ -6,7 +6,7 @@ import { NewTaskModal } from '../components/NewTaskModal';
 import { connectProjectStream } from '../lib/ws';
 import type { TaskStatus } from '../lib/api';
 
-const COLUMNS: TaskStatus[] = ['backlog', 'ready', 'running', 'review', 'done'];
+const COLUMNS: TaskStatus[] = ['backlog', 'blocked', 'ready', 'running', 'review', 'done'];
 
 export function Board() {
   const { slug } = useParams();
@@ -55,6 +55,7 @@ export function Board() {
 
   const tasksByStatus: Record<TaskStatus, typeof tasks[string][]> = {
     backlog: [],
+    blocked: [],
     ready: [],
     running: [],
     review: [],

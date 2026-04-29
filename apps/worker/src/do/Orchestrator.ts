@@ -24,6 +24,7 @@ import { ulid } from 'ulid';
 import { getDb, schema } from '../lib/db';
 import { safeBroadcast } from '../lib/broadcast';
 import { taskDto, runDto } from '../lib/dto';
+import { unresolvedBlockers } from '../lib/dependencies';
 import type { Env } from '../lib/types';
 
 const RECONCILE_INTERVAL_MS = 60_000;
@@ -70,6 +71,39 @@ export class Orchestrator extends DurableObject<Env> {
         outcome: 'skipped',
         reason: `task_status=${task.status}`,
       };
+    }
+
+    // Defense-in-depth: re-check blockers right before claiming. Catches a
+    // race where a task was marked ready but a blocker reverted before the
+    // queue message arrived. Cheap query, indexed lookup.
+    const stillBlocked = await unresolvedBlockers(db, task.id);
+    if (stillBlocked.length > 0) {
+      const now = new Date();
+      await db
+        .update(schema.tasks)
+        .set({ status: 'blocked', updatedAt: now })
+        .where(eq(schema.tasks.id, task.id));
+      await db.insert(schema.events).values({
+        id: ulid(),
+        taskId: task.id,
+        runId: null,
+        type: 'system',
+        author: 'system',
+        payload: { message: 'Reverted to blocked: dependencies unresolved at claim time.' },
+        createdAt: now,
+      });
+      const reverted = await db
+        .select()
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, task.id))
+        .get();
+      if (reverted) {
+        await safeBroadcast(this.env, reverted.projectId, {
+          type: 'task.updated',
+          task: taskDto(reverted),
+        });
+      }
+      return { taskId: msg.taskId, outcome: 'skipped', reason: 'blocked_at_claim' };
     }
     const project = await db
       .select()
