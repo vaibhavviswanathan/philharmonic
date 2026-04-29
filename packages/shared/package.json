@@ -3,20 +3,20 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
     },
     "./ws-protocol": {
-      "types": "./dist/ws-protocol.d.ts",
-      "default": "./dist/ws-protocol.js"
+      "types": "./src/ws-protocol.ts",
+      "default": "./src/ws-protocol.ts"
     },
     "./api-types": {
-      "types": "./dist/api-types.d.ts",
-      "default": "./dist/api-types.js"
+      "types": "./src/api-types.ts",
+      "default": "./src/api-types.ts"
     }
   },
   "scripts": {
