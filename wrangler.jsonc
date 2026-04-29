@@ -126,7 +126,7 @@
     {
       "class_name": "Sandbox",
       "image": "./containers/sandbox/Dockerfile",
-      "instance_type": "standard"
+      "instance_type": "standard-1"
       // M7: route every container outbound HTTP through the egress proxy
       // Worker so secrets get injected at the network edge, never in
       // container env. Deploy that Worker first:
