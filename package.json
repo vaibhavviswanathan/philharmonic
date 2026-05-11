@@ -12,7 +12,7 @@
   "scripts": {
     "bootstrap": "tsx scripts/bootstrap.ts",
     "build": "pnpm -r build",
-    "dev": "wrangler dev",
+    "dev": "tsx scripts/dev.ts",
     "deploy": "pnpm build && wrangler deploy && tsx scripts/postdeploy.ts",
     "migrate:local": "wrangler d1 migrations apply philharmonic --local",
     "migrate:remote": "wrangler d1 migrations apply philharmonic --remote",
