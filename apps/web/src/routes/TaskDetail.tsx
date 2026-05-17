@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type ArtifactDto, type EventDto, type RunDto, type TaskDto, type TaskStatus } from '../lib/api';
 import { useBoard, useProjects } from '../lib/store';
+import { DependencyPicker } from '../components/DependencyPicker';
 
 const STATUS_ACTIONS: Partial<Record<TaskStatus, { label: string; to: TaskStatus }[]>> = {
   backlog: [{ label: 'Run now', to: 'ready' }],
@@ -20,9 +21,20 @@ export function TaskDetail() {
   const [task, setTask] = useState<TaskDto | null>(null);
   const [latestRun, setLatestRun] = useState<RunDto | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactDto[]>([]);
+  const [blockers, setBlockers] = useState<TaskDto[]>([]);
+  const [blocking, setBlocking] = useState<TaskDto[]>([]);
   const [events, setEvents] = useState<EventDto[]>([]);
   const [comment, setComment] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
+
+  async function refreshDeps(taskId: string) {
+    const detail = await api.getTask(taskId);
+    setTask(detail.task);
+    setLatestRun(detail.latestRun);
+    setBlockers(detail.blockers);
+    setBlocking(detail.blocking);
+  }
 
   useEffect(() => {
     if (!projectsLoaded) void loadProjects();
@@ -40,9 +52,11 @@ export function TaskDetail() {
           setError('Task not found');
           return;
         }
-        setTask(found);
         const detail = await api.getTask(found.id);
+        setTask(detail.task);
         setLatestRun(detail.latestRun);
+        setBlockers(detail.blockers);
+        setBlocking(detail.blocking);
         if (detail.latestRun) {
           try {
             const runDetail = await api.getRun(detail.latestRun.id);
@@ -150,6 +164,60 @@ export function TaskDetail() {
         </section>
       ) : null}
 
+      <section className="dependencies">
+        <div className="deps-col">
+          <header>
+            <h3>Blocked by</h3>
+            <button className="ghost small" onClick={() => setShowPicker(true)}>
+              + Add blocker
+            </button>
+          </header>
+          {blockers.length === 0 ? (
+            <p className="muted">No blockers.</p>
+          ) : (
+            <ul className="dep-list">
+              {blockers.map((b) => (
+                <BlockerRow
+                  key={b.id}
+                  task={b}
+                  projectSlug={project.slug}
+                  onRemove={async () => {
+                    await api.removeDependency(task.id, b.id);
+                    await refreshDeps(task.id);
+                  }}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="deps-col">
+          <h3>Blocking</h3>
+          {blocking.length === 0 ? (
+            <p className="muted">Nothing depends on this.</p>
+          ) : (
+            <ul className="dep-list">
+              {blocking.map((b) => (
+                <li key={b.id}>
+                  <Link to={`/projects/${project.slug}/tasks/${b.number}`}>
+                    <code>{b.identifier}</code> {b.title}
+                  </Link>
+                  <span className={`status-pill status-${b.status}`}>{b.status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      {showPicker ? (
+        <DependencyPicker
+          task={task}
+          currentBlockerIds={new Set(blockers.map((b) => b.id))}
+          onClose={() => setShowPicker(false)}
+          onAdded={() => refreshDeps(task.id)}
+        />
+      ) : null}
+
       {task.description ? (
         <section className="task-body">
           <pre>{task.description}</pre>
@@ -192,6 +260,42 @@ export function TaskDetail() {
         )}
       </section>
     </section>
+  );
+}
+
+function BlockerRow({
+  task,
+  projectSlug,
+  onRemove,
+}: {
+  task: TaskDto;
+  projectSlug: string;
+  onRemove: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <li>
+      <Link to={`/projects/${projectSlug}/tasks/${task.number}`}>
+        <code>{task.identifier}</code> {task.title}
+      </Link>
+      <span className={`status-pill status-${task.status}`}>{task.status}</span>
+      <button
+        type="button"
+        className="ghost small"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await onRemove();
+          } finally {
+            setBusy(false);
+          }
+        }}
+        title="Remove this blocker"
+      >
+        ×
+      </button>
+    </li>
   );
 }
 
