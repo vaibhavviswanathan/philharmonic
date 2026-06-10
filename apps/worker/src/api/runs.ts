@@ -4,7 +4,7 @@
  * sandbox + persist; SPEC §8.1/§12.2).
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { ulid } from 'ulid';
 import { safeBroadcast } from '../lib/broadcast';
@@ -78,18 +78,23 @@ runsRoute.post('/runs/:id/cancel', async (c) => {
   const now = new Date();
 
   // 1) Terminate Workflow + destroy sandbox + persist cancelled + broadcast
-  //    run.updated — the shared helper (SPEC §12.2).
-  await cancelRun(c.env, db, run, { now, projectId: task?.projectId });
+  //    run.updated — the shared helper (SPEC §12.2). Returns undefined when
+  //    the run reached a terminal status first (helper write is a CAS).
+  const cancelled = await cancelRun(c.env, db, run, { now, projectId: task?.projectId });
 
   // 2) Reset the task through the blocker gate (§1's law) and re-enqueue if
-  //    it lands ready.
-  if (task && task.status === 'running') {
+  //    it lands ready. CAS on `running`: the task read above is stale by the
+  //    seconds cancelRun took — an agent-set `review` landing in that window
+  //    must not be dragged back to ready (§12.2). When cancelRun lost the
+  //    race entirely, the Workflow's finish/mark-failed owns the hand-off.
+  if (cancelled && task) {
     const target = await gateReadyTransition(db, task.id);
-    await db
+    const reset = await db
       .update(schema.tasks)
       .set({ status: target, updatedAt: now })
-      .where(eq(schema.tasks.id, task.id));
-    if (target === 'ready') {
+      .where(and(eq(schema.tasks.id, task.id), eq(schema.tasks.status, 'running')))
+      .returning();
+    if (reset[0] && target === 'ready') {
       await c.env.DISPATCH.send({ taskId: task.id, projectId: task.projectId });
     }
   }

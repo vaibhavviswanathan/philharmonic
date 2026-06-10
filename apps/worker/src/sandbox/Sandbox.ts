@@ -32,6 +32,10 @@ const STATIC_ALLOWED_HOSTS = [
   '*.githubusercontent.com',
   'api.anthropic.com',
   'registry.npmjs.org',
+  // Local dev API origin (.dev.vars sets API_BASE=http://host.docker.internal:8787)
+  // so dev MCP traffic goes through the allowlist rather than around it. The
+  // name only resolves inside local Docker — harmless in production.
+  'host.docker.internal',
 ];
 
 /**
@@ -53,12 +57,18 @@ async function withHeader(req: Request, name: string, value: string): Promise<Re
 }
 
 async function injectGitHub(req: Request, env: Env): Promise<Response> {
-  if (hasPresignedSignature(new URL(req.url))) return fetch(req);
+  const url = new URL(req.url);
+  // Never attach real secrets to cleartext: interception covers port-80 HTTP
+  // too, and the agent controls its own request schemes (§15).
+  if (url.protocol !== 'https:') return fetch(req);
+  if (hasPresignedSignature(url)) return fetch(req);
   const token = await readSecret(env.GITHUB_TOKEN);
   return withHeader(req, 'Authorization', `Bearer ${token}`);
 }
 
 async function injectAnthropic(req: Request, env: Env): Promise<Response> {
+  // Same cleartext rule as injectGitHub — the request goes out uncredentialed.
+  if (new URL(req.url).protocol !== 'https:') return fetch(req);
   const key = await readSecret(env.ANTHROPIC_API_KEY);
   return withHeader(req, 'x-api-key', key);
 }

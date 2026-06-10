@@ -11,11 +11,18 @@ import { ulid } from 'ulid';
 import { z } from 'zod';
 import { safeBroadcast } from '../lib/broadcast';
 import { getDb, projectSlug, schema } from '../lib/db';
-import { DependencyError, addDependencyForAgent } from '../lib/dependencies';
+import { DependencyError, addDependencyForAgent, resolveDependents } from '../lib/dependencies';
 import { artifactDto, eventDto, runDto, taskDto } from '../lib/dto';
 import { type RunTokenClaims, RunTokenError, readSecret, verifyRunToken } from '../lib/runtoken';
 import { TransitionError, assertAllowed } from '../lib/transitions';
 import type { Variables as BaseVariables, Env } from '../lib/types';
+import {
+  type UploadMint,
+  acceptedContentLength,
+  isValidUploadId,
+  uploadMetaKey,
+  uploadObjectKey,
+} from '../lib/uploads';
 
 type Variables = BaseVariables & { runClaims: RunTokenClaims };
 
@@ -199,7 +206,19 @@ internalRoute.post('/proof', async (c) => {
   } else if (uploadId) {
     // Claims-only scoping (SPEC §7.2): the key is derived from the TOKEN's
     // runId, so an uploadId minted by another run can never resolve here.
-    r2Key = `runs/${runId}/uploads/${uploadId}`;
+    // The mint sentinel is verified too — only ids this run actually minted
+    // (and uploaded) can be attached (SPEC §8.2).
+    if (!isValidUploadId(uploadId)) {
+      return c.json({ error: { code: 'no_upload', message: 'Invalid upload id' } }, 404);
+    }
+    const mint = await c.env.ARTIFACTS.head(uploadMetaKey(runId, uploadId));
+    if (!mint) {
+      return c.json(
+        { error: { code: 'no_upload', message: 'Upload was not minted by this run' } },
+        404,
+      );
+    }
+    r2Key = uploadObjectKey(runId, uploadId);
     const head = await c.env.ARTIFACTS.head(r2Key);
     if (!head) {
       return c.json({ error: { code: 'no_upload', message: 'Upload not found' } }, 404);
@@ -270,10 +289,16 @@ internalRoute.post('/uploads', async (c) => {
   if (!parse.success) {
     return c.json({ error: { code: 'invalid_body', message: parse.error.message } }, 400);
   }
+  const { runId } = c.var.runClaims;
+  if (!runId) {
+    return c.json({ error: { code: 'no_run', message: 'Run token has no runId' } }, 400);
+  }
   // R2 bindings cannot mint presigned URLs, so the upload comes back through
   // the Worker (SPEC §8.2). The id is minted here; the PUT below namespaces
-  // it under the token's run.
+  // it under the token's run. The declared metadata is persisted as a mint
+  // sentinel so PUT/proof can reject unminted ids and enforce the size cap.
   const uploadId = ulid();
+  await c.env.ARTIFACTS.put(uploadMetaKey(runId, uploadId), JSON.stringify(parse.data));
   return c.json({
     uploadId,
     uploadUrl: `/api/internal/uploads/${uploadId}`,
@@ -282,13 +307,45 @@ internalRoute.post('/uploads', async (c) => {
 
 internalRoute.put('/uploads/:uploadId', async (c) => {
   const uploadId = c.req.param('uploadId');
-  // Claims-only scoping (SPEC §7.2): the key is derived from the TOKEN's
-  // runId, never from the request — cross-run writes are structurally
-  // impossible because run A's token can only ever write under runs/A/.
-  const r2Key = `runs/${c.var.runClaims.runId}/uploads/${uploadId}`;
-  const contentType = c.req.header('content-type') ?? 'application/octet-stream';
+  const { runId } = c.var.runClaims;
+  if (!runId) {
+    return c.json({ error: { code: 'no_run', message: 'Run token has no runId' } }, 400);
+  }
+  // ULID-shaped ids only — Hono decodes percent-encoded slashes into the
+  // param, so this also kills any attempt at key-suffix/path games.
+  if (!isValidUploadId(uploadId)) {
+    return c.json({ error: { code: 'no_upload', message: 'Invalid upload id' } }, 404);
+  }
+  // Reject ids not minted by this run (SPEC §8.2). Claims-only scoping
+  // (SPEC §7.2): both keys derive from the TOKEN's runId, never the request —
+  // cross-run writes are structurally impossible because run A's token can
+  // only ever address runs/A/.
+  const mintObj = await c.env.ARTIFACTS.get(uploadMetaKey(runId, uploadId));
+  if (!mintObj) {
+    return c.json(
+      { error: { code: 'no_upload', message: 'Upload was not minted by this run' } },
+      404,
+    );
+  }
+  const mint = (await mintObj.json()) as UploadMint;
+  // Enforce the declared size: Content-Length must be present and within the
+  // minted sizeBytes — the runtime then holds the stream to that length.
+  const length = acceptedContentLength(c.req.header('content-length'), mint.sizeBytes);
+  if (length === null) {
+    return c.json(
+      {
+        error: {
+          code: 'too_large',
+          message: `Content-Length is required and must not exceed the declared sizeBytes (${mint.sizeBytes}).`,
+        },
+      },
+      413,
+    );
+  }
+  const r2Key = uploadObjectKey(runId, uploadId);
   await c.env.ARTIFACTS.put(r2Key, c.req.raw.body, {
-    httpMetadata: { contentType },
+    // The minted contentType is authoritative, not the request header.
+    httpMetadata: { contentType: mint.contentType },
   });
   return c.json({ ok: true, r2Key });
 });
@@ -365,7 +422,18 @@ internalRoute.post('/dependencies', async (c) => {
 
   // Gate: an already-resolved blocker records the edge but must not block
   // the task or defer the run — tell the agent to keep working (SPEC §8.5).
-  if (blocker.status === 'done' || blocker.status === 'cancelled') {
+  // The gate re-reads the blocker AFTER the edge insert (the snapshot above
+  // only resolved the id): addDependencyForAgent is several D1 round-trips,
+  // and a blocker approved (review → done) in that window would otherwise be
+  // gated on a stale 'unresolved' verdict — stranding the task in `blocked`
+  // forever, since the cascade for an already-terminal blocker never refires.
+  const freshBlocker = await db
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, blocker.id))
+    .get();
+  const blockerStatus = freshBlocker?.status ?? blocker.status;
+  if (blockerStatus === 'done' || blockerStatus === 'cancelled') {
     return c.json({ ok: true, blockedBy: blocker.id, alreadyResolved: true });
   }
 
@@ -408,6 +476,21 @@ internalRoute.post('/dependencies', async (c) => {
     c.executionCtx.waitUntil(
       safeBroadcast(c.env, projectId, { type: 'run.updated', run: runDto(deferred[0]) }),
     );
+  }
+
+  // Close the remaining race: the blocker may have gone terminal between the
+  // post-insert read and our blocked/deferred writes (its cascade saw a
+  // still-`running` dependent and skipped it). Re-read once more — the
+  // happens-before pairing guarantees at least one side observes the truth —
+  // and run the cascade ourselves if it resolved. resolveDependents re-checks
+  // blocked status + remaining blockers, so this is idempotent.
+  const finalBlocker = await db
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, blocker.id))
+    .get();
+  if (finalBlocker && (finalBlocker.status === 'done' || finalBlocker.status === 'cancelled')) {
+    await resolveDependents(c.env, db, blocker.id);
   }
 
   const updated = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get();

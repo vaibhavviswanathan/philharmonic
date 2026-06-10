@@ -5,6 +5,15 @@ import { useProjects } from '../lib/store';
 import { connectProjectStream } from '../lib/ws';
 
 export function RunViewer() {
+  // Remount the viewer whenever the run changes so accumulated logs, the
+  // fetched run/artifacts, any sticky error, and auto-scroll state all reset
+  // instead of leaking from the previous run (React Router keeps the
+  // component mounted when navigating between two /runs/:runId URLs).
+  const { runId } = useParams();
+  return <RunViewerInner key={runId} />;
+}
+
+function RunViewerInner() {
   const { slug, number, runId } = useParams();
   const { bySlug, loaded: projectsLoaded, load: loadProjects } = useProjects();
   const project = slug ? bySlug[slug] : undefined;
@@ -27,6 +36,7 @@ export function RunViewer() {
         const detail = await api.getRun(runId);
         setRun(detail.run);
         setArtifacts(detail.artifacts);
+        setError(null); // a successful fetch recovers from a transient error
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -53,6 +63,7 @@ export function RunViewer() {
           .then((detail) => {
             setRun(detail.run);
             setArtifacts(detail.artifacts);
+            setError(null);
           })
           .catch(() => {});
       },

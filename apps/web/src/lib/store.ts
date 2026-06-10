@@ -164,9 +164,20 @@ export const useBoard = create<BoardStore>((set, get) => ({
     set({ tasks: { ...get().tasks, [taskId]: { ...current, status: to } } });
     try {
       const { task } = await api.transitionTask(taskId, to);
-      set({ tasks: { ...get().tasks, [taskId]: task } });
+      // Skip if a concurrent WS update (e.g. orchestrator claim → running,
+      // or a gate redirect to blocked) already moved the task past our
+      // optimistic write — the broadcast is newer than this response.
+      const latest = get().tasks[taskId];
+      if (!latest || latest.status === to) {
+        set({ tasks: { ...get().tasks, [taskId]: task } });
+      }
     } catch (err) {
-      set({ tasks: { ...get().tasks, [taskId]: { ...current, status: previous } } });
+      // Roll back only the status, onto the freshest object; skip entirely
+      // if a concurrent update already replaced our optimistic status.
+      const latest = get().tasks[taskId];
+      if (latest && latest.status === to) {
+        set({ tasks: { ...get().tasks, [taskId]: { ...latest, status: previous } } });
+      }
       throw err;
     }
   },

@@ -70,7 +70,7 @@ importers:
   apps/worker:
     dependencies:
       '@cloudflare/sandbox':
-        specifier: ^0.12.1
+        specifier: 0.12.1
         version: 0.12.1
       '@philharmonic/shared':
         specifier: workspace:*

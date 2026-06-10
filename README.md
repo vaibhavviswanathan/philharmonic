@@ -31,7 +31,7 @@ You file a task  →  click Run  →  Sandbox spins up  →  Claude implements  
 
 - A **Cloudflare account** — the control plane runs on the free plan; **Workers Paid** is required for Containers and Workflows (the agent runtime)
 - An **Anthropic API key** — get one at <https://console.anthropic.com>
-- A **GitHub fine-grained PAT** with `repo` and `pull_request` scopes for the repos Philharmonic will work on
+- A **GitHub fine-grained PAT** scoped to the repos Philharmonic will work on, with repository permissions **Contents: Read and write** and **Pull requests: Read and write**
 - **Node 22+**, **pnpm 9+**
 - **Docker** — the sandbox container image is built on your machine during deploy (`wrangler deploy` invokes Docker for `containers/sandbox/Dockerfile`)
 
@@ -71,7 +71,7 @@ Open the deployed URL. You'll land on a **Post-Deploy Setup** screen that walks 
 
 1. In the Cloudflare dashboard, create an **Access application** pointed at your Worker's hostname (`philharmonic.YOUR-SUBDOMAIN.workers.dev`).
 2. Copy your **team domain** — it must include the scheme, e.g. `https://yourteam.cloudflareaccess.com` — and the application's **Audience (AUD) tag**.
-3. Set them as `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in `wrangler.jsonc` `vars`.
+3. Set them as `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in `wrangler.jsonc` `vars`. In the same `vars` block, also set `API_BASE` to your deployed Worker origin (e.g. `https://philharmonic.YOUR-SUBDOMAIN.workers.dev`) — it gates the agent↔API channel; with it unset, the agent's Tasks MCP cannot reach the API. Commit these changes if you use CI.
 4. Re-run `pnpm run deploy`, then hit "I'm done — re-check" on the setup screen.
 
 Log in. Create a project. File a task. Click Run. Watch it work.
@@ -128,6 +128,8 @@ Notes:
 
 - `CLOUDFLARE_API_TOKEN` — Workers (incl. Containers/Workflows), D1, R2, Queues edit permissions
 - `CLOUDFLARE_ACCOUNT_ID`
+
+The workflow deploys the `wrangler.jsonc` that is committed to your repo. Before enabling it, commit the bootstrap-patched config — the real `database_id`/`store_id` plus the `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD`/`API_BASE` vars from the Access step (none of these are secrets). With empty IDs the CI deploy fails; with empty Access vars a successful CI deploy silently resets a working deployment back to the setup screen.
 
 GitHub-hosted Ubuntu runners have Docker preinstalled, so the container image builds in CI out of the box.
 

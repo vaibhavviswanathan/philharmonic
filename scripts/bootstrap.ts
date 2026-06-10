@@ -149,11 +149,19 @@ function parseTableRows(text: string): string[][] {
 
 // ─── prompt helpers ─────────────────────────────────────────────────────────
 
-const rl = readline.createInterface({ input, output });
-
+/**
+ * Create the readline interface lazily, per question. A persistent interface
+ * would keep a keypress handler attached to stdin that echoes typed
+ * characters itself — defeating promptSecret's raw-mode echo suppression and
+ * printing secrets in plaintext.
+ */
 async function prompt(question: string): Promise<string> {
-  const answer = await rl.question(`  ${c.cyan}?${c.reset} ${question} `);
-  return answer.trim();
+  const rl = readline.createInterface({ input, output });
+  try {
+    return (await rl.question(`  ${c.cyan}?${c.reset} ${question} `)).trim();
+  } finally {
+    rl.close();
+  }
 }
 
 async function promptSecret(question: string): Promise<string> {
@@ -201,7 +209,10 @@ async function confirm(question: string, dflt = true): Promise<boolean> {
 
 function ensureWranglerLogin(): void {
   step('Checking Cloudflare login');
-  const r = shTry('wrangler', ['whoami']);
+  // `--json` matters: plain `whoami` exits 0 even when unauthenticated (it
+  // just prints "You are not authenticated"), while the JSON mode exits
+  // non-zero — making this an actual login check.
+  const r = shTry('wrangler', ['whoami', '--json']);
   if (!r.ok) {
     die('Not logged in to Cloudflare. Run `wrangler login` first, then re-run bootstrap.');
   }
@@ -545,7 +556,8 @@ async function main() {
     },
     {
       name: 'GITHUB_TOKEN',
-      question: 'Paste your GITHUB_TOKEN (fine-grained PAT, repo + PR scope, input hidden):',
+      question:
+        'Paste your GITHUB_TOKEN (fine-grained PAT; Contents + Pull requests: Read and write; input hidden):',
     },
   ];
   for (const { name, question } of credentials) {
@@ -562,8 +574,6 @@ async function main() {
     await putSecret(storeId, name, value, { overwrite: true });
   }
 
-  rl.close();
-
   // Migrations.
   runMigrations();
 
@@ -575,14 +585,16 @@ async function main() {
   );
   process.stdout.write('  2. Configure Cloudflare Access pointing at the deployed Worker URL\n');
   process.stdout.write(
-    `  3. Set ${c.cyan}ACCESS_TEAM_DOMAIN${c.reset} and ${c.cyan}ACCESS_AUD${c.reset} in wrangler.jsonc \`vars\`, then re-run \`pnpm run deploy\`\n`,
+    `  3. Set ${c.cyan}ACCESS_TEAM_DOMAIN${c.reset}, ${c.cyan}ACCESS_AUD${c.reset}, and ${c.cyan}API_BASE${c.reset} (your deployed Worker origin, e.g. https://philharmonic.<your-subdomain>.workers.dev — agents reach the API through it) in wrangler.jsonc \`vars\`, then re-run \`pnpm run deploy\`\n`,
   );
   process.stdout.write(
-    `  4. Visit your Worker URL — Philharmonic's PostDeploySetup screen will guide you the rest of the way\n\n`,
+    `  4. If you use the GitHub Actions deploy workflow, commit the updated wrangler.jsonc (IDs + vars — none are secrets) so CI deploys don't fail or reset them\n`,
+  );
+  process.stdout.write(
+    `  5. Visit your Worker URL — Philharmonic's PostDeploySetup screen will guide you the rest of the way\n\n`,
   );
 }
 
 main().catch((err) => {
-  rl.close();
   die(err instanceof Error ? err.message : String(err));
 });

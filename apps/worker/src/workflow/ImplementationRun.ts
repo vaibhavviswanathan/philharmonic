@@ -13,12 +13,15 @@
  *                 the run succeeded and fall back to moving the task to review.
  *   mark-failed — (catch) run failed; reset the task only if still `running`,
  *                 through the dependency gate, re-enqueueing when it lands `ready`.
+ *                 A run the agent already `deferred` is left untouched (the error
+ *                 came after the hand-off) and the workflow ends cleanly.
  *   cleanup     — destroy the sandbox in a finally block.
  *
  * Every step.do body must be idempotent — Workflows replay on resume.
  */
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
+import { NonRetryableError } from 'cloudflare:workflows';
 import { getSandbox } from '@cloudflare/sandbox';
 import { eq, sql } from 'drizzle-orm';
 import { ulid } from 'ulid';
@@ -109,7 +112,20 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
         run: { id: runId, attempt },
       });
 
-      const apiBase = this.env.API_BASE || 'http://host.docker.internal:8787';
+      // The agent's Tasks MCP reaches the API at this origin (§14.2). In a
+      // deployed Worker there is NO silent fallback: host.docker.internal does
+      // not exist inside a Cloudflare container, so an unset API_BASE would
+      // strand the entire MCP surface while runs looked successful. Fail the
+      // run loudly instead. Local dev sets API_BASE via the committed
+      // .dev.vars (http://host.docker.internal:8787, allowlisted in Sandbox.ts).
+      const apiBase = this.env.API_BASE?.trim();
+      if (!apiBase) {
+        throw new NonRetryableError(
+          'API_BASE is not set. Set the API_BASE var in wrangler.jsonc to your deployed ' +
+            'Worker origin (e.g. https://philharmonic.<account>.workers.dev) and redeploy. ' +
+            'For local dev, .dev.vars provides http://host.docker.internal:8787.',
+        );
+      }
       const mcpConfig = {
         mcpServers: {
           philharmonic: {
@@ -151,7 +167,24 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
         { retries: { limit: 1, delay: '30 seconds' }, timeout: '2 hours' },
         async () => {
           const db = getDb(this.env.DB);
-          await db.update(schema.runs).set({ status: 'running' }).where(eq(schema.runs.id, runId));
+          // Retry guard: if the agent already deferred (declare_dependency →
+          // run `deferred`, task `blocked`) and the first attempt then threw
+          // (e.g. claude exited non-zero after declaring), do NOT re-run the
+          // agent — the run is terminal and the deferral already handed off.
+          const current = await db
+            .select({ status: schema.runs.status })
+            .from(schema.runs)
+            .where(eq(schema.runs.id, runId))
+            .get();
+          if (current?.status === 'deferred') return;
+          // CAS: never un-terminate a run (deferred/cancelled/...) back to
+          // `running` — only an active pre-agent status may move forward.
+          await db
+            .update(schema.runs)
+            .set({ status: 'running' })
+            .where(
+              sql`${schema.runs.id} = ${runId} AND ${schema.runs.status} IN ('queued', 'preparing', 'running')`,
+            );
           await this.broadcastRun(runId, projectId);
 
           const sandbox = getSandbox(this.env.Sandbox, taskId);
@@ -247,7 +280,19 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
       // Land step: capture the PR the agent opened, attach the diff artifact.
       await step.do('land', { retries: { limit: 2, delay: '15 seconds' } }, async () => {
         const db = getDb(this.env.DB);
-        await db.update(schema.runs).set({ status: 'landing' }).where(eq(schema.runs.id, runId));
+        // CAS (§8.5(4)/§12.1): the agent may have deferred mid-runAgent (run
+        // terminal `deferred`, task `blocked`, agent exits 0). An
+        // unconditional `landing` write would erase the deferral and turn
+        // finish's deferred short-circuit into dead code — so guard the write
+        // and skip the whole step when the run is already terminal.
+        const landing = await db
+          .update(schema.runs)
+          .set({ status: 'landing' })
+          .where(
+            sql`${schema.runs.id} = ${runId} AND ${schema.runs.status} NOT IN ('deferred', 'succeeded', 'failed', 'cancelled')`,
+          )
+          .run();
+        if ((landing.meta?.changes ?? 0) === 0) return; // already terminal — nothing to land
         await this.broadcastRun(runId, projectId);
 
         const project = await db
@@ -322,10 +367,15 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
         }
 
         const now = new Date();
+        // CAS for the reload→write window: a deferral/cancel landing after
+        // the reload above must not be overwritten. `succeeded` itself stays
+        // re-writable so a replayed finish still reaches the task fallback.
         await db
           .update(schema.runs)
           .set({ status: 'succeeded', endedAt: now })
-          .where(eq(schema.runs.id, runId));
+          .where(
+            sql`${schema.runs.id} = ${runId} AND ${schema.runs.status} NOT IN ('deferred', 'failed', 'cancelled')`,
+          );
 
         // The agent should have already transitioned the task to `review` via
         // philharmonic.update_status. If it didn't (e.g. exited early), do it
@@ -350,9 +400,24 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
         await this.broadcastTask(taskId, projectId);
       });
     } catch (err) {
-      await step.do('mark-failed', async () => {
+      const outcome = await step.do('mark-failed', async () => {
         const db = getDb(this.env.DB);
         const now = new Date();
+
+        // A deferral is deliberate and terminal (§8.5(3)/§12.1). If the agent
+        // declared a dependency and the workflow STILL errored afterwards
+        // (e.g. claude exited non-zero right after declaring), the deferral
+        // already handed off: run `deferred` + endedAt, task `blocked`, slot
+        // freed. Record nothing as failed — the workflow is done, not broken.
+        const run = await db.select().from(schema.runs).where(eq(schema.runs.id, runId)).get();
+        if (run?.status === 'deferred') {
+          await this.persistAgentLog(runId, agentLog.text);
+          await this.broadcastRun(runId, projectId);
+          return 'deferred' as const;
+        }
+
+        // CAS: never overwrite a terminal run — a deferral/cancel landing
+        // between the reload above and this write must survive.
         await db
           .update(schema.runs)
           .set({
@@ -360,7 +425,9 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
             endedAt: now,
             errorMessage: err instanceof Error ? err.message : String(err),
           })
-          .where(eq(schema.runs.id, runId));
+          .where(
+            sql`${schema.runs.id} = ${runId} AND ${schema.runs.status} NOT IN ('deferred', 'succeeded', 'cancelled')`,
+          );
 
         // Reset the task ONLY if it is still `running` — never clobber an
         // agent-set `review` or `blocked`. The reset goes through the
@@ -368,12 +435,34 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
         const task = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).get();
         if (task && task.status === 'running') {
           const gated = await gateReadyTransition(db, taskId);
-          await db
+          const reset = await db
             .update(schema.tasks)
             .set({ status: gated, updatedAt: now })
-            .where(sql`${schema.tasks.id} = ${taskId} AND ${schema.tasks.status} = 'running'`);
-          if (gated === 'ready') {
-            await this.env.DISPATCH.send({ taskId, projectId });
+            .where(sql`${schema.tasks.id} = ${taskId} AND ${schema.tasks.status} = 'running'`)
+            .run();
+          if ((reset.meta?.changes ?? 0) > 0) {
+            // §8.1/§8.5: every transition writes a status_change event; a
+            // gate redirect records { requested: 'ready', to: 'blocked' }.
+            await db.insert(schema.events).values({
+              id: ulid(),
+              taskId,
+              runId,
+              type: 'status_change',
+              author: 'system',
+              payload:
+                gated === 'blocked'
+                  ? {
+                      from: 'running',
+                      requested: 'ready',
+                      to: 'blocked',
+                      reason: 'workflow_failed',
+                    }
+                  : { from: 'running', to: 'ready', reason: 'workflow_failed' },
+              createdAt: now,
+            });
+            if (gated === 'ready') {
+              await this.env.DISPATCH.send({ taskId, projectId });
+            }
           }
         }
 
@@ -383,8 +472,11 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
 
         await this.broadcastRun(runId, projectId);
         await this.broadcastTask(taskId, projectId);
+        return 'failed' as const;
       });
-      throw err;
+      // A post-deferral error is not a workflow failure — the run is
+      // deliberately deferred and fully handed off; end the instance cleanly.
+      if (outcome !== 'deferred') throw err;
     } finally {
       await step.do('cleanup', async () => {
         try {

@@ -41,6 +41,12 @@ const ACTIVE_RUN_STATUSES = ['queued', 'preparing', 'running', 'landing'] as con
  * can legitimately have none for a moment. After 10 minutes it never will.
  */
 const NO_INSTANCE_GRACE_MS = 10 * 60_000;
+/**
+ * Grace period before resetting a `running` task that has no run row. The
+ * sweep runs under the claim mutex, so a claim can't be mid-flight — but a
+ * grace window is kept as defense-in-depth against any writer outside the DO.
+ */
+const NO_RUN_GRACE_MS = 5 * 60_000;
 /** Orphaned-sandbox sweep window: latest run ended 24–48h ago (SPEC §11.3). */
 const ORPHAN_SWEEP_MIN_MS = 24 * 60 * 60_000;
 const ORPHAN_SWEEP_MAX_MS = 48 * 60 * 60_000;
@@ -237,7 +243,11 @@ export class Orchestrator extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     try {
-      await this.reconcile();
+      // Run the sweep under the claim mutex (§11.2): input gates don't cover
+      // D1 awaits, so an unserialized sweep could observe a half-finished
+      // claim (task `running`, run row not yet inserted) and reset it —
+      // double-claiming the task and double-running its sandbox.
+      await this.serializeClaim(() => this.reconcile());
     } catch (err) {
       console.warn('reconcile failed:', err);
     }
@@ -276,6 +286,10 @@ export class Orchestrator extends DurableObject<Env> {
         .get();
 
       if (!run) {
+        // The mutex means a claim can't be mid-flight, so a run-less running
+        // task is a dead claim — but only reset after a grace window, in case
+        // anything outside the DO ever races the task into `running`.
+        if (Date.now() - task.updatedAt.getTime() < NO_RUN_GRACE_MS) continue;
         await this.resetTask(db, task, null, 'Reconciled: running task had no run.');
         continue;
       }
@@ -285,6 +299,7 @@ export class Orchestrator extends DurableObject<Env> {
 
       // Query the real Workflow — never a wall-clock heuristic (§11.3).
       let deadReason: string | null = null;
+      const missingKey = `missing:${run.id}`;
       if (!run.workflowInstanceId) {
         if (Date.now() - run.createdAt.getTime() > NO_INSTANCE_GRACE_MS) {
           deadReason = 'no workflow instance was ever attached';
@@ -296,13 +311,30 @@ export class Orchestrator extends DurableObject<Env> {
           if (status === 'errored' || status === 'terminated' || status === 'complete') {
             deadReason = `workflow ${status} but run still active`;
           }
-        } catch {
+          await this.ctx.storage.delete(missingKey);
+        } catch (err) {
+          // Discriminate (§11.3): only a genuine unknown-id error means the
+          // instance is gone. A transient infra/RPC failure must NOT kill a
+          // healthy mid-flight run — skip it; the next 60s sweep retries.
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/not found|does not exist|no such/i.test(msg)) continue;
+          // Even a real not-found gets a persisted grace period before we
+          // declare the workflow dead.
+          const firstMissing = await this.ctx.storage.get<number>(missingKey);
+          if (firstMissing == null) {
+            await this.ctx.storage.put(missingKey, Date.now());
+            continue;
+          }
+          if (Date.now() - firstMissing < NO_INSTANCE_GRACE_MS) continue;
           deadReason = 'workflow instance not found'; // get() throws on unknown ids
         }
       }
       if (!deadReason) continue;
 
       const now = new Date();
+      // CAS: only an ACTIVE run may be failed by reconciliation. The finish
+      // step writes succeeded/deferred from outside the DO, so the row may
+      // have gone terminal during the status() RPC — never overwrite that.
       const failed = await db
         .update(schema.runs)
         .set({
@@ -310,8 +342,12 @@ export class Orchestrator extends DurableObject<Env> {
           endedAt: now,
           errorMessage: `reconciliation: ${deadReason}`,
         })
-        .where(eq(schema.runs.id, run.id))
+        .where(
+          and(eq(schema.runs.id, run.id), inArray(schema.runs.status, [...ACTIVE_RUN_STATUSES])),
+        )
         .returning();
+      await this.ctx.storage.delete(missingKey);
+      if (failed.length === 0) continue; // run finished while we looked — its own path owns the task hand-off
       await this.resetTask(db, task, run.id, `Run reconciled: ${deadReason}.`);
       if (failed[0]) {
         await safeBroadcast(this.env, task.projectId, {
@@ -337,10 +373,14 @@ export class Orchestrator extends DurableObject<Env> {
   ): Promise<void> {
     const target = await gateReadyTransition(db, task.id);
     const now = new Date();
-    await db
+    // CAS: only reset a task that is STILL `running` — an agent-set `review`
+    // (or any other concurrent transition) must never be clobbered (§12.2).
+    const reset = await db
       .update(schema.tasks)
       .set({ status: target, updatedAt: now })
-      .where(eq(schema.tasks.id, task.id));
+      .where(and(eq(schema.tasks.id, task.id), eq(schema.tasks.status, 'running')))
+      .run();
+    if ((reset.meta?.changes ?? 0) === 0) return;
     await db.insert(schema.events).values({
       id: ulid(),
       taskId: task.id,

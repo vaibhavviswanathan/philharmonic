@@ -15,7 +15,12 @@ Branch: `v2-hardening` (stacked on `d3-agent-deps`).
 - [x] T0.3 Create this tasks.md
 - [x] T0.4 Update DEVIATIONS.md (most v1 deviations get absorbed into SPEC v2; file shrinks to genuinely-open deviations)
 - [x] T0.5 Update README to match reality (template story, secrets list, settings page)
-- [x] T0.6 Final build + typecheck + lint + tests green (54 tests; biome clean; wrangler --dry-run parses)
+- [x] T0.6 Final build + typecheck + lint + tests green (61 tests; biome clean; wrangler --dry-run parses)
+- [x] T0.8 Adversarial multi-agent review of the full diff — 20 confirmed findings, all fixed:
+  - critical: land step clobbered `deferred` runs (the deferral short-circuit was dead code)
+  - high: reconcile treated transient RPC errors as instance-not-found (would kill healthy runs); alarm sweep wasn't under the claim mutex (double-claim window); deferred runs clobbered by mark-failed; empty `API_BASE` silently broke the whole agent↔API channel on fresh deploys (now fails loudly + documented in PostDeploySetup/README/bootstrap)
+  - medium: missing CAS guards on reconcile/cancel writes; agent-declare gate raced blocker resolution; uploads accepted unminted ids with no size cap; bootstrap echoed secrets to the terminal; README CI section omitted the commit-the-patched-config prerequisite; sandbox SDK was caret-ranged vs the exact-pinned image
+  - low: cleartext credential injection; sticky SPA error states; optimistic-update clobbering; dev-config containers flip; whoami auth check no-op; classic-PAT scope names; missing status_change event on workflow failure resets
 - [ ] T0.7 Push branch + open PR (stacked on d3-agent-deps)
 
 ## 1. Orchestrator / Queue / Workflow (worker core)

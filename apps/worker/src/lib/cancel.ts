@@ -9,7 +9,7 @@
  */
 
 import { getSandbox } from '@cloudflare/sandbox';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { safeBroadcast } from './broadcast';
 import { type DB, schema } from './db';
 import { runDto } from './dto';
@@ -26,7 +26,9 @@ export interface CancelRunOpts {
 /**
  * Terminate the run's Workflow instance (tolerating already-terminal
  * instances), destroy its sandbox, persist `cancelled` + `endedAt`, and
- * broadcast `run.updated`. Returns the updated run row.
+ * broadcast `run.updated`. Returns the updated run row — `undefined` when the
+ * run reached a terminal status first (the cancelled write is a CAS), in
+ * which case the Workflow's finish/mark-failed path owns the task hand-off.
  */
 export async function cancelRun(
   env: Env,
@@ -55,11 +57,19 @@ export async function cancelRun(
     console.warn('sandbox destroy failed:', err);
   }
 
-  // 3) Persist cancellation + broadcast run.updated.
+  // 3) Persist cancellation + broadcast run.updated. CAS: terminate() +
+  //    destroy() above take seconds, so the Workflow may have reached
+  //    finish/mark-failed (or the agent deferred) in the window — a terminal
+  //    `succeeded`/`failed`/`deferred` row must never be overwritten.
   const updated = await db
     .update(schema.runs)
     .set({ status: 'cancelled', endedAt: now })
-    .where(eq(schema.runs.id, run.id))
+    .where(
+      and(
+        eq(schema.runs.id, run.id),
+        inArray(schema.runs.status, ['queued', 'preparing', 'running', 'landing']),
+      ),
+    )
     .returning();
 
   let projectId = opts.projectId;

@@ -48,8 +48,9 @@ export function TaskDetail() {
    * this page calls the API directly and applies the result locally, so deep
    * links work without the board store ever having been loaded (SPEC §9.1).
    */
-  const loadDetail = useCallback(async (taskId: string) => {
+  const loadDetail = useCallback(async (taskId: string, isStale: () => boolean = () => false) => {
     const detail = await api.getTask(taskId);
+    if (isStale()) return;
     setTask(detail.task);
     setLatestRun(detail.latestRun);
     setBlockers(detail.blockers);
@@ -59,11 +60,13 @@ export function TaskDetail() {
       useBoard.getState().upsertTask(detail.task);
     }
     const [ev, runList] = await Promise.all([api.listEvents(taskId), api.listRuns(taskId)]);
+    if (isStale()) return;
     setEvents(ev.events);
     setRuns(runList.runs.slice().sort((a, b) => b.createdAt - a.createdAt));
     if (detail.latestRun) {
       try {
         const runDetail = await api.getRun(detail.latestRun.id);
+        if (isStale()) return;
         setArtifacts(runDetail.artifacts);
       } catch {
         /* artifacts are best-effort */
@@ -81,19 +84,27 @@ export function TaskDetail() {
 
   useEffect(() => {
     if (!project || !number) return;
+    let cancelled = false;
+    // Clear any error from a previous load — the error state is otherwise
+    // sticky and would keep showing after a successful re-navigation.
+    setError(null);
     void (async () => {
       try {
         const { tasks } = await api.listTasks(project.id);
+        if (cancelled) return;
         const found = tasks.find((t) => t.number === Number.parseInt(number, 10));
         if (!found) {
           setError('Task not found');
           return;
         }
-        await loadDetail(found.id);
+        await loadDetail(found.id, () => cancelled);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [project, number, loadDetail]);
 
   // Live updates: subscribe to the project stream while the page is open
