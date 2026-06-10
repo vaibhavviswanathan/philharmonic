@@ -10,7 +10,7 @@
     "drizzle:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "^0.5.0",
+    "@cloudflare/sandbox": "^0.12.1",
     "@philharmonic/shared": "workspace:*",
     "drizzle-orm": "^0.36.4",
     "hono": "^4.6.10",
