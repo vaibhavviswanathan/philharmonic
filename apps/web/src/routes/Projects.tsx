@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useProjects } from '../lib/store';
 import { NewProjectModal } from '../components/NewProjectModal';
+import { useProjects } from '../lib/store';
 
 export function Projects() {
   const { byId, loaded, load } = useProjects();
@@ -17,7 +17,9 @@ export function Projects() {
     <section className="page">
       <header className="page-header">
         <h1>Projects</h1>
-        <button onClick={() => setShowModal(true)}>+ New project</button>
+        <button type="button" onClick={() => setShowModal(true)}>
+          + New project
+        </button>
       </header>
 
       {!loaded ? (

@@ -8,8 +8,8 @@
  * before reaching this middleware.
  */
 
-import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { Context, MiddlewareHandler } from 'hono';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { AccessUser, Env, Variables } from '../lib/types';
 
 type JwksCacheKey = string;
@@ -53,7 +53,8 @@ export async function verifyAccessJwt(request: Request, env: Env): Promise<Acces
     return {
       email: payload.email,
       sub: payload.sub,
-      identityNonce: typeof payload.identity_nonce === 'string' ? payload.identity_nonce : undefined,
+      identityNonce:
+        typeof payload.identity_nonce === 'string' ? payload.identity_nonce : undefined,
     };
   } catch (err) {
     if (err instanceof AccessAuthError) throw err;
@@ -79,8 +80,5 @@ export function jsonError(c: Context, err: unknown): Response {
     const status = err.code === 'setup_required' ? 503 : 401;
     return c.json({ error: { code: err.code, message: err.message } }, status);
   }
-  return c.json(
-    { error: { code: 'internal_error', message: 'Unexpected error' } },
-    500,
-  );
+  return c.json({ error: { code: 'internal_error', message: 'Unexpected error' } }, 500);
 }

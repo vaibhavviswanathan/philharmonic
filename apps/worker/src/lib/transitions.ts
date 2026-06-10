@@ -4,7 +4,8 @@
  * Mapped by who's allowed to make the transition:
  *   - 'human'  — anyone with Access (most user-driven moves)
  *   - 'orch'   — only the Orchestrator DO (claim → running)
- *   - 'agent'  — only a run-token holder (running → review)
+ *   - 'agent'  — only a run-token holder (running → review, and
+ *                running → blocked via the declare-dependency path)
  *
  * `blocked` is the holding pattern for tasks with unresolved dependencies.
  * The API normally redirects backlog/blocked → ready into the `blocked` lane
@@ -34,6 +35,7 @@ const RULES: Record<TaskStatus, Partial<Record<TaskStatus, Actor>>> = {
   },
   running: {
     review: 'agent',
+    blocked: 'agent', // declare-dependency only (SPEC §8.5) — not reachable via /transition
     cancelled: 'human',
     ready: 'human', // human override — pulls a stuck run back
   },

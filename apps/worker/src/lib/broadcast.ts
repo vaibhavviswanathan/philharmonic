@@ -1,9 +1,10 @@
 /**
  * Helper for pushing events into the per-project TasksRoom Durable Object.
+ * The ONLY caller of the DO's /broadcast route (SPEC §10.3).
  *
  * Always called from inside the API Worker — same Worker, same script, same
- * binding boundary, so we don't need INTERNAL_API_TOKEN here. That token is for
- * cross-Worker calls (e.g. the egress proxy reporting upstream).
+ * binding boundary. No token auth: the DO is unreachable except via its
+ * binding, and the WS upgrade route only ever forwards /ws/... paths.
  */
 
 import type { ServerMessage } from '@philharmonic/shared/ws-protocol';
@@ -24,11 +25,7 @@ export async function broadcast(
   });
 }
 
-export function safeBroadcast(
-  env: Env,
-  projectId: string,
-  message: ServerMessage,
-): Promise<void> {
+export function safeBroadcast(env: Env, projectId: string, message: ServerMessage): Promise<void> {
   return broadcast(env, projectId, message).catch((err) => {
     console.warn('broadcast failed:', err);
   });

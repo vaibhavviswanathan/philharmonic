@@ -15,16 +15,13 @@
  * statuses (`done`, `cancelled`) both unblock dependents.
  */
 
-import { eq, inArray, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { ulid } from 'ulid';
-import * as schema from './schema';
-import type { DB } from './db';
-import { taskDto } from './dto';
-import type { Env } from './types';
 import { safeBroadcast } from './broadcast';
-
-const RESOLVED_STATUSES: schema.TaskStatus[] = ['done', 'cancelled'];
-const MAX_CASCADE_DEPTH = 64;
+import { type DB, projectSlug } from './db';
+import { taskDto } from './dto';
+import * as schema from './schema';
+import type { Env } from './types';
 
 export class DependencyError extends Error {
   constructor(
@@ -109,7 +106,7 @@ export async function addDependencyForAgent(
     .onConflictDoNothing()
     .returning();
   // If the edge already existed, returning() yields []. Treat that as success.
-  return inserted[0] ?? row as schema.TaskDependency;
+  return inserted[0] ?? (row as schema.TaskDependency);
 }
 
 export async function addDependency(
@@ -151,15 +148,16 @@ export async function addDependency(
     createdAt: new Date(),
     createdBy,
   };
-  const inserted = await db.insert(schema.taskDependencies).values(row).returning();
-  return inserted[0]!;
+  const inserted = await db
+    .insert(schema.taskDependencies)
+    .values(row)
+    .onConflictDoNothing()
+    .returning();
+  // Duplicate edge = idempotent no-op success (SPEC §6.2), same as the agent path.
+  return inserted[0] ?? (row as schema.TaskDependency);
 }
 
-export async function removeDependency(
-  db: DB,
-  taskId: string,
-  blockerId: string,
-): Promise<void> {
+export async function removeDependency(db: DB, taskId: string, blockerId: string): Promise<void> {
   await db
     .delete(schema.taskDependencies)
     .where(
@@ -210,73 +208,71 @@ export async function listBlocking(db: DB, taskId: string): Promise<schema.Task[
 }
 
 /**
- * Cascading unblock. Call after a task hits `done` or `cancelled`. Walks
- * dependents; for each currently-`blocked` task whose blockers are now all
- * resolved, transitions to `ready` and enqueues onto DISPATCH so the
- * Orchestrator can claim it.
+ * Resolution cascade. Call after a task reaches `done` or `cancelled` —
+ * inline, before the HTTP response (a dropped cascade strands dependents).
+ * Walks the direct dependents; each currently-`blocked` one whose blockers
+ * are now all resolved transitions to `ready` and is enqueued onto DISPATCH.
  *
- * Bounded by MAX_CASCADE_DEPTH to keep pathological graphs from looping.
+ * Single-level by construction (SPEC §8.5): an unblocked task becomes
+ * `ready`, never `done`/`cancelled`, so it can't transitively unblock its
+ * own dependents — one pass, no frontier loop.
  */
 export async function resolveDependents(
   env: Env,
   db: DB,
   resolvedTaskId: string,
 ): Promise<schema.Task[]> {
+  const resolved = await db
+    .select()
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, resolvedTaskId))
+    .get();
+  if (!resolved) return [];
+  // Edges are same-project-only, so the resolver's slug serves every dependent.
+  const slug = await projectSlug(db, resolved.projectId);
+
+  const dependents = await db
+    .select({ task: schema.tasks })
+    .from(schema.taskDependencies)
+    .innerJoin(schema.tasks, eq(schema.taskDependencies.taskId, schema.tasks.id))
+    .where(eq(schema.taskDependencies.blockedBy, resolvedTaskId))
+    .all();
+
   const unblocked: schema.Task[] = [];
-  const visited = new Set<string>([resolvedTaskId]);
-  let frontier: string[] = [resolvedTaskId];
+  for (const { task: dep } of dependents) {
+    if (dep.status !== 'blocked') continue;
+    const remaining = await unresolvedBlockers(db, dep.id);
+    if (remaining.length > 0) continue;
 
-  for (let depth = 0; depth < MAX_CASCADE_DEPTH && frontier.length > 0; depth++) {
-    const dependents = await db
-      .select({
-        taskId: schema.taskDependencies.taskId,
-        task: schema.tasks,
-      })
-      .from(schema.taskDependencies)
-      .innerJoin(schema.tasks, eq(schema.taskDependencies.taskId, schema.tasks.id))
-      .where(inArray(schema.taskDependencies.blockedBy, frontier))
-      .all();
-
-      const candidates = dependents
-        .filter(({ task }) => task.status === 'blocked' && !visited.has(task.id))
-        .map(({ task }) => task);
-
-    const next: string[] = [];
-    for (const dep of candidates) {
-      visited.add(dep.id);
-      const remaining = await unresolvedBlockers(db, dep.id);
-      if (remaining.length > 0) continue;
-
-      const now = new Date();
-      await db
-        .update(schema.tasks)
-        .set({ status: 'ready', updatedAt: now })
-        .where(eq(schema.tasks.id, dep.id));
-      await db.insert(schema.events).values({
-        id: ulid(),
-        taskId: dep.id,
-        runId: null,
-        type: 'system',
-        author: 'system',
-        payload: { message: 'Unblocked: all dependencies resolved.' },
-        createdAt: now,
+    const now = new Date();
+    await db
+      .update(schema.tasks)
+      .set({ status: 'ready', updatedAt: now })
+      .where(eq(schema.tasks.id, dep.id));
+    await db.insert(schema.events).values({
+      id: ulid(),
+      taskId: dep.id,
+      runId: null,
+      type: 'system',
+      author: 'system',
+      payload: {
+        message: 'Unblocked: all dependencies resolved.',
+        // Record HOW the last blocker resolved — `cancelled` counts as
+        // resolved by design, and humans need to be able to tell (SPEC §8.5).
+        resolvedBy: resolvedTaskId,
+        resolvedStatus: resolved.status,
+      },
+      createdAt: now,
+    });
+    await env.DISPATCH.send({ taskId: dep.id, projectId: dep.projectId });
+    const refreshed = await db.select().from(schema.tasks).where(eq(schema.tasks.id, dep.id)).get();
+    if (refreshed) {
+      unblocked.push(refreshed);
+      await safeBroadcast(env, refreshed.projectId, {
+        type: 'task.updated',
+        task: taskDto(refreshed, slug),
       });
-      await env.DISPATCH.send({ taskId: dep.id, projectId: dep.projectId });
-      const refreshed = await db
-        .select()
-        .from(schema.tasks)
-        .where(eq(schema.tasks.id, dep.id))
-        .get();
-      if (refreshed) {
-        unblocked.push(refreshed);
-        await safeBroadcast(env, refreshed.projectId, {
-          type: 'task.updated',
-          task: taskDto(refreshed),
-        });
-        next.push(refreshed.id); // cascading further is rare but possible
-      }
     }
-    frontier = next;
   }
 
   return unblocked;
@@ -287,25 +283,19 @@ export async function resolveDependents(
  * land it in `blocked` instead. Used by the transition handler. Returns the
  * status we actually persisted.
  */
-export async function gateReadyTransition(
-  db: DB,
-  taskId: string,
-): Promise<'ready' | 'blocked'> {
+export async function gateReadyTransition(db: DB, taskId: string): Promise<'ready' | 'blocked'> {
   const blockers = await unresolvedBlockers(db, taskId);
   return blockers.length === 0 ? 'ready' : 'blocked';
 }
 
 // ─── internal: cycle check ─────────────────────────────────────────────────
 
-async function assertNoCycle(
-  db: DB,
-  taskId: string,
-  blockerId: string,
-): Promise<void> {
+async function assertNoCycle(db: DB, taskId: string, blockerId: string): Promise<void> {
   const seen = new Set<string>();
   const stack = [blockerId];
   while (stack.length > 0) {
-    const node = stack.pop()!;
+    const node = stack.pop();
+    if (node === undefined) break;
     if (node === taskId) {
       throw new DependencyError(
         'cycle',

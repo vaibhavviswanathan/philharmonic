@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { useBoard, useProjects } from '../lib/store';
 import { Column } from '../components/Column';
 import { NewTaskModal } from '../components/NewTaskModal';
-import { connectProjectStream } from '../lib/ws';
 import type { TaskStatus } from '../lib/api';
+import { useBoard, useProjects } from '../lib/store';
+import { connectProjectStream } from '../lib/ws';
 
 const HIDE_BLOCKED_KEY = 'philharmonic:hideBlocked';
 
@@ -16,9 +16,7 @@ export function Board() {
   const { tasks, projectId, loaded, load } = useBoard();
   const [showModal, setShowModal] = useState(false);
   const [hideBlocked, setHideBlocked] = useState(() =>
-    typeof localStorage !== 'undefined'
-      ? localStorage.getItem(HIDE_BLOCKED_KEY) !== '0'
-      : true,
+    typeof localStorage !== 'undefined' ? localStorage.getItem(HIDE_BLOCKED_KEY) !== '0' : true,
   );
 
   function toggleHideBlocked() {
@@ -75,7 +73,7 @@ export function Board() {
     );
   }
 
-  const tasksByStatus: Record<TaskStatus, typeof tasks[string][]> = {
+  const tasksByStatus: Record<TaskStatus, (typeof tasks)[string][]> = {
     backlog: [],
     blocked: [],
     ready: [],
@@ -95,13 +93,15 @@ export function Board() {
       <header className="page-header">
         <h1>{project.name}</h1>
         <div className="board-actions">
-          <button onClick={toggleHideBlocked} className="ghost small">
+          <button type="button" onClick={toggleHideBlocked} className="ghost small">
             {hideBlocked ? `Show blocked (${blockedCount})` : 'Hide blocked'}
           </button>
           <Link to={`/projects/${project.slug}/settings`} className="ghost">
             Settings
           </Link>
-          <button onClick={() => setShowModal(true)}>+ New task</button>
+          <button type="button" onClick={() => setShowModal(true)}>
+            + New task
+          </button>
         </div>
       </header>
 

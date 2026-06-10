@@ -3,6 +3,10 @@
  *
  * Default subscription on connect: all task.* and event.* + run.created/updated.
  * `run.log` is opt-in per-run (logs are noisy).
+ *
+ * Heartbeats are NOT JSON frames: clients send the literal string `ping` and
+ * the runtime auto-responds with the literal string `pong` without waking a
+ * hibernated DO (SPEC §10.4). Everything below is JSON.
  */
 
 // ─── Domain shapes (mirrored from api-types so the WS protocol is self-contained)
@@ -23,14 +27,10 @@ export type RunStatus =
   | 'landing'
   | 'succeeded'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'deferred';
 
-export type EventType =
-  | 'comment'
-  | 'status_change'
-  | 'agent_action'
-  | 'proof'
-  | 'system';
+export type EventType = 'comment' | 'status_change' | 'agent_action' | 'proof' | 'system';
 
 export interface WsTask {
   id: string;
@@ -80,15 +80,13 @@ export type ServerMessage =
   | { type: 'event.created'; taskId: string; event: WsEvent }
   | { type: 'run.created'; run: WsRun }
   | { type: 'run.updated'; run: WsRun }
-  | { type: 'run.log'; runId: string; lines: string[] }
-  | { type: 'pong'; t: number };
+  | { type: 'run.log'; runId: string; lines: string[] };
 
 // ─── Client → server messages ──────────────────────────────────────────────
 
 export type ClientMessage =
   | { type: 'subscribe.run'; runId: string }
-  | { type: 'unsubscribe.run'; runId: string }
-  | { type: 'ping'; t: number };
+  | { type: 'unsubscribe.run'; runId: string };
 
 export const isServerMessage = (m: unknown): m is ServerMessage =>
   !!m && typeof m === 'object' && typeof (m as { type?: unknown }).type === 'string';

@@ -17,10 +17,11 @@ export interface Env {
   Sandbox: DurableObjectNamespace<CFSandbox>;
   RUN: Workflow;
 
+  // Three required secrets (SPEC §7.3) — INTERNAL_API_TOKEN was removed in
+  // v2: the TasksRoom /broadcast route is binding-internal, nothing verifies it.
   ANTHROPIC_API_KEY: SecretsStoreSecret;
   GITHUB_TOKEN: SecretsStoreSecret;
   RUN_TOKEN_SECRET: SecretsStoreSecret;
-  INTERNAL_API_TOKEN: SecretsStoreSecret;
 
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

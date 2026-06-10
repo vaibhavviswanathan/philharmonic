@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, type ArtifactDto, type RunDto } from '../lib/api';
-import { connectProjectStream } from '../lib/ws';
+import { type ArtifactDto, type RunDto, api } from '../lib/api';
 import { useProjects } from '../lib/store';
+import { connectProjectStream } from '../lib/ws';
 
 export function RunViewer() {
   const { slug, number, runId } = useParams();
@@ -35,14 +35,28 @@ export function RunViewer() {
 
   useEffect(() => {
     if (!project || !runId) return;
-    const conn = connectProjectStream(project.slug, (m) => {
-      if (m.type === 'run.log' && m.runId === runId) {
-        setLogs((prev) => [...prev, ...m.lines]);
-      }
-      if (m.type === 'run.updated' && m.run.id === runId) {
-        setRun(m.run);
-      }
-    });
+    const conn = connectProjectStream(
+      project.slug,
+      (m) => {
+        if (m.type === 'run.log' && m.runId === runId) {
+          setLogs((prev) => [...prev, ...m.lines]);
+        }
+        if (m.type === 'run.updated' && m.run.id === runId) {
+          setRun(m.run);
+        }
+      },
+      () => {
+        // Reconnected: refetch run state to fill the gap (log lines aren't
+        // replayed; the persisted `logs` artifact covers full history).
+        void api
+          .getRun(runId)
+          .then((detail) => {
+            setRun(detail.run);
+            setArtifacts(detail.artifacts);
+          })
+          .catch(() => {});
+      },
+    );
     // Opt-in to log streaming for this run.
     conn.send({ type: 'subscribe.run', runId });
     return () => {
@@ -51,6 +65,7 @@ export function RunViewer() {
     };
   }, [project, runId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-scroll whenever new log lines arrive
   useEffect(() => {
     if (!autoScroll || !logBox.current) return;
     logBox.current.scrollTop = logBox.current.scrollHeight;
@@ -92,15 +107,15 @@ export function RunViewer() {
   return (
     <section className="page run-viewer">
       <Link to={`/projects/${project.slug}/tasks/${number}`} className="back">
-        ← Task PHIL-{number}
+        ← Task #{number}
       </Link>
 
       <header className="run-header">
         <div>
           <h1>Run {run.id.slice(0, 8)}</h1>
           <p className="muted">
-            <span className={`status-pill run-status-${run.status}`}>{run.status}</span>{' '}
-            · started {run.startedAt ? new Date(run.startedAt).toLocaleTimeString() : '—'}
+            <span className={`status-pill run-status-${run.status}`}>{run.status}</span> · started{' '}
+            {run.startedAt ? new Date(run.startedAt).toLocaleTimeString() : '—'}
             {run.endedAt ? ` · ended ${new Date(run.endedAt).toLocaleTimeString()}` : ''}
           </p>
         </div>
@@ -111,22 +126,20 @@ export function RunViewer() {
             </a>
           ) : null}
           {active ? (
-            <button className="danger" onClick={cancel}>
+            <button type="button" className="danger" onClick={cancel}>
               Cancel run
             </button>
           ) : null}
         </div>
       </header>
 
-      {run.errorMessage ? (
-        <pre className="error-message">{run.errorMessage}</pre>
-      ) : null}
+      {run.errorMessage ? <pre className="error-message">{run.errorMessage}</pre> : null}
 
       <section className="logs">
         <header>
           <h2>Live agent log</h2>
           {!autoScroll ? (
-            <button onClick={() => setAutoScroll(true)} className="ghost small">
+            <button type="button" onClick={() => setAutoScroll(true)} className="ghost small">
               ↓ jump to latest
             </button>
           ) : null}
@@ -148,11 +161,7 @@ export function RunViewer() {
           <ul>
             {artifacts.map((a) => (
               <li key={a.id}>
-                <a
-                  href={api.artifactUrl(run.id, a.id)}
-                  target="_blank"
-                  rel="noreferrer"
-                >
+                <a href={api.artifactUrl(run.id, a.id)} target="_blank" rel="noreferrer">
                   <span className={`artifact-kind kind-${a.kind}`}>{a.kind}</span>
                   <span className="artifact-meta">
                     {a.caption ?? a.r2Key.split('/').pop() ?? 'artifact'}

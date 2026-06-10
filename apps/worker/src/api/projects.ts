@@ -4,32 +4,17 @@
  * Authenticated by accessAuthMiddleware (mounted at the parent in index.ts).
  */
 
-import { Hono } from 'hono';
 import { eq, sql } from 'drizzle-orm';
+import { Hono } from 'hono';
 import { ulid } from 'ulid';
 import { z } from 'zod';
+// The single canonical default template (SPEC §13.4) — bundled as a text
+// module via the wrangler `rules` entry; no inline copy to drift out of sync.
+import DEFAULT_WORKFLOW_MD from '../../../../containers/sandbox/WORKFLOW.md';
+import { safeBroadcast } from '../lib/broadcast';
 import { getDb, schema } from '../lib/db';
 import { projectDto, taskDto } from '../lib/dto';
-import { safeBroadcast } from '../lib/broadcast';
 import type { Env, Variables } from '../lib/types';
-
-const DEFAULT_WORKFLOW_MD = `You are a coding agent implementing a task.
-
-## Task
-
-**{{ task.identifier }}: {{ task.title }}**
-
-{{ task.description }}
-
-## Your job
-
-1. Understand the codebase. Read the README, look at the directory structure.
-2. Make a plan. Use philharmonic.post_comment to share it with the team.
-3. Implement the change. Follow the project's conventions.
-4. Run tests. Make sure they pass before opening a PR.
-5. Open a pull request via gh pr create. Title: \`{{ task.identifier }}: <summary>\`.
-6. Move the task to \`review\` via philharmonic.update_status.
-`;
 
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
@@ -71,14 +56,12 @@ projectsRoute.post('/projects', async (c) => {
     updatedAt: now,
   };
   try {
-    const inserted = await db.insert(schema.projects).values(row).returning();
-    return c.json({ project: projectDto(inserted[0]!) }, 201);
+    const [inserted] = await db.insert(schema.projects).values(row).returning();
+    if (!inserted) throw new Error('insert returned no row');
+    return c.json({ project: projectDto(inserted) }, 201);
   } catch (err) {
     if (String(err).includes('UNIQUE')) {
-      return c.json(
-        { error: { code: 'slug_taken', message: 'Slug is already in use.' } },
-        409,
-      );
+      return c.json({ error: { code: 'slug_taken', message: 'Slug is already in use.' } }, 409);
     }
     throw err;
   }
@@ -111,12 +94,24 @@ projectsRoute.patch('/projects/:id', async (c) => {
   if (result.length === 0) {
     return c.json({ error: { code: 'not_found', message: 'Project not found' } }, 404);
   }
-  return c.json({ project: projectDto(result[0]!) });
+  const [updated] = result;
+  if (!updated) {
+    return c.json({ error: { code: 'not_found', message: 'Project not found' } }, 404);
+  }
+  return c.json({ project: projectDto(updated) });
 });
 
 projectsRoute.get('/projects/:id/tasks', async (c) => {
   const db = getDb(c.env.DB);
   const projectId = c.req.param('id');
+  const project = await db
+    .select({ slug: schema.projects.slug })
+    .from(schema.projects)
+    .where(eq(schema.projects.id, projectId))
+    .get();
+  if (!project) {
+    return c.json({ error: { code: 'not_found', message: 'Project not found' } }, 404);
+  }
   const status = c.req.query('status');
   const rows = await db
     .select()
@@ -127,7 +122,7 @@ projectsRoute.get('/projects/:id/tasks', async (c) => {
         : eq(schema.tasks.projectId, projectId),
     )
     .all();
-  return c.json({ tasks: rows.map(taskDto) });
+  return c.json({ tasks: rows.map((row) => taskDto(row, project.slug)) });
 });
 
 projectsRoute.post('/projects/:id/tasks', async (c) => {
@@ -143,7 +138,7 @@ projectsRoute.post('/projects/:id/tasks', async (c) => {
   const db = getDb(c.env.DB);
   const projectId = c.req.param('id');
   const project = await db
-    .select({ id: schema.projects.id })
+    .select({ id: schema.projects.id, slug: schema.projects.slug })
     .from(schema.projects)
     .where(eq(schema.projects.id, projectId))
     .get();
@@ -172,8 +167,9 @@ projectsRoute.post('/projects/:id/tasks', async (c) => {
     createdAt: now,
     updatedAt: now,
   };
-  const inserted = await db.insert(schema.tasks).values(row).returning();
-  const dto = taskDto(inserted[0]!);
+  const [inserted] = await db.insert(schema.tasks).values(row).returning();
+  if (!inserted) throw new Error('insert returned no row');
+  const dto = taskDto(inserted, project.slug);
   c.executionCtx.waitUntil(safeBroadcast(c.env, projectId, { type: 'task.created', task: dto }));
   return c.json({ task: dto }, 201);
 });

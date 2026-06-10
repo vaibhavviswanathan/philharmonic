@@ -31,22 +31,12 @@ export type RunStatus =
   | 'landing'
   | 'succeeded'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'deferred';
 
-export type EventType =
-  | 'comment'
-  | 'status_change'
-  | 'agent_action'
-  | 'proof'
-  | 'system';
+export type EventType = 'comment' | 'status_change' | 'agent_action' | 'proof' | 'system';
 
-export type ArtifactKind =
-  | 'pr_diff'
-  | 'screenshot'
-  | 'video'
-  | 'logs'
-  | 'ci_summary'
-  | 'other';
+export type ArtifactKind = 'pr_diff' | 'screenshot' | 'video' | 'logs' | 'ci_summary' | 'other';
 
 export interface ProjectDto {
   id: string;
@@ -64,7 +54,7 @@ export interface TaskDto {
   id: string;
   projectId: string;
   number: number;
-  identifier: string; // "PHIL-{number}" — convenience for the agent
+  identifier: string; // "<UPPERCASED-SLUG>-{number}" (e.g. "WEB-12") — convenience for the agent
   title: string;
   description: string;
   status: TaskStatus;
@@ -90,10 +80,11 @@ export interface RunDto {
 
 // `payload` shape is documented per `type`:
 //   comment       → { body: string }
-//   status_change → { from: TaskStatus, to: TaskStatus }
+//   status_change → { from: TaskStatus, to: TaskStatus, requested?: TaskStatus }
 //   agent_action  → { tool: string, summary?: string }
 //   proof         → { artifactId: string, kind: ArtifactKind, caption?: string }
-//   system        → { message: string }
+//   system        → { message: string, ... } (cascade unblocks add
+//                   { resolvedBy: taskId, resolvedStatus: 'done' | 'cancelled' })
 export interface EventDto {
   id: string;
   taskId: string;
@@ -102,6 +93,27 @@ export interface EventDto {
   author: string;
   payload: Record<string, unknown>;
   createdAt: number;
+}
+
+export interface ArtifactDto {
+  id: string;
+  runId: string;
+  kind: ArtifactKind;
+  r2Key: string;
+  mime: string;
+  sizeBytes: number;
+  caption: string | null;
+  createdAt: number;
+}
+
+// ─── Response DTOs ───────────────────────────────────────────────────────────
+
+/** GET /api/tasks/:id — task + latest-run summary + dependency edges. */
+export interface TaskDetailResponse {
+  task: TaskDto;
+  latestRun: RunDto | null;
+  blockers: TaskDto[];
+  blocking: TaskDto[];
 }
 
 // ─── Request DTOs ────────────────────────────────────────────────────────────
@@ -142,4 +154,33 @@ export interface TransitionTaskRequest {
 
 export interface CreateCommentRequest {
   body: string;
+}
+
+// ─── Dependency contract ─────────────────────────────────────────────────────
+
+/** POST /api/tasks/:id/dependencies — human-added blocker (SPEC §8.5). */
+export interface AddDependencyRequest {
+  /** Task id of the blocker. Same project only; duplicate adds are no-ops. */
+  blockedBy: string;
+}
+
+/**
+ * POST /api/internal/dependencies — agent-declared blocker (SPEC §8.5).
+ * `blockedBy` is a task identifier ("WEB-4", case-insensitive) or a raw task
+ * id, resolved within the run token's project.
+ */
+export interface DeclareDependencyRequest {
+  blockedBy: string;
+  reason?: string;
+}
+
+export interface DeclareDependencyResponse {
+  ok: true;
+  /** Resolved task id of the blocker. */
+  blockedBy: string;
+  /**
+   * The named blocker is already done/cancelled: the edge was recorded but
+   * the task was NOT blocked and the run was NOT deferred — keep working.
+   */
+  alreadyResolved?: boolean;
 }

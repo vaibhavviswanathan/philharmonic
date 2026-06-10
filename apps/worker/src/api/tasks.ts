@@ -4,14 +4,13 @@
  * See SPEC §8.1 for the full surface.
  */
 
+import { and, desc, eq, inArray, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { and, desc, eq, lt } from 'drizzle-orm';
 import { ulid } from 'ulid';
 import { z } from 'zod';
-import { getDb, schema } from '../lib/db';
-import { eventDto, runDto, taskDto } from '../lib/dto';
-import { TransitionError, assertAllowed } from '../lib/transitions';
 import { safeBroadcast } from '../lib/broadcast';
+import { cancelRun } from '../lib/cancel';
+import { getDb, projectSlug, schema } from '../lib/db';
 import {
   DependencyError,
   addDependency,
@@ -21,6 +20,8 @@ import {
   removeDependency,
   resolveDependents,
 } from '../lib/dependencies';
+import { eventDto, runDto, taskDto } from '../lib/dto';
+import { TransitionError, assertAllowed } from '../lib/transitions';
 import type { Env, Variables } from '../lib/types';
 
 export const tasksRoute = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -32,7 +33,7 @@ tasksRoute.get('/tasks/:id', async (c) => {
   if (!task) {
     return c.json({ error: { code: 'not_found', message: 'Task not found' } }, 404);
   }
-  const [latestRun, blockers, blocking] = await Promise.all([
+  const [latestRun, blockers, blocking, slug] = await Promise.all([
     db
       .select()
       .from(schema.runs)
@@ -42,12 +43,14 @@ tasksRoute.get('/tasks/:id', async (c) => {
       .get(),
     listBlockers(db, id),
     listBlocking(db, id),
+    projectSlug(db, task.projectId),
   ]);
+  // Dependency edges are same-project-only, so one slug covers all of them.
   return c.json({
-    task: taskDto(task),
+    task: taskDto(task, slug),
     latestRun: latestRun ? runDto(latestRun) : null,
-    blockers: blockers.map(taskDto),
-    blocking: blocking.map(taskDto),
+    blockers: blockers.map((t) => taskDto(t, slug)),
+    blocking: blocking.map((t) => taskDto(t, slug)),
   });
 });
 
@@ -71,8 +74,15 @@ tasksRoute.patch('/tasks/:id', async (c) => {
   if (updated.length === 0) {
     return c.json({ error: { code: 'not_found', message: 'Task not found' } }, 404);
   }
-  const dto = taskDto(updated[0]!);
-  c.executionCtx.waitUntil(safeBroadcast(c.env, dto.projectId, { type: 'task.updated', task: dto }));
+  const [updatedTask] = updated;
+  if (!updatedTask) {
+    return c.json({ error: { code: 'not_found', message: 'Task not found' } }, 404);
+  }
+  const slug = await projectSlug(db, updatedTask.projectId);
+  const dto = taskDto(updatedTask, slug);
+  c.executionCtx.waitUntil(
+    safeBroadcast(c.env, dto.projectId, { type: 'task.updated', task: dto }),
+  );
   return c.json({ task: dto });
 });
 
@@ -123,18 +133,48 @@ tasksRoute.post('/tasks/:id/transition', async (c) => {
     createdAt: now,
   });
 
+  // Cancelling (or pulling back) a task with an active run must tear the run
+  // down too — terminate the Workflow + destroy the sandbox via the shared
+  // helper (SPEC §8.1 side effects, §12.2). The pull-back lane covers the
+  // gate redirect as well: running → ready may land in blocked.
+  if (
+    target === 'cancelled' ||
+    (task.status === 'running' && (target === 'ready' || target === 'blocked'))
+  ) {
+    const activeRun = await db
+      .select()
+      .from(schema.runs)
+      .where(
+        and(
+          eq(schema.runs.taskId, id),
+          inArray(schema.runs.status, ['queued', 'preparing', 'running', 'landing']),
+        ),
+      )
+      .orderBy(desc(schema.runs.createdAt))
+      .limit(1)
+      .get();
+    if (activeRun) {
+      await cancelRun(c.env, db, activeRun, { now, projectId: task.projectId });
+    }
+  }
+
   // ready transition enqueues onto DISPATCH so the Orchestrator picks it up.
   if (target === 'ready') {
     await c.env.DISPATCH.send({ taskId: id, projectId: task.projectId });
   }
 
-  // Terminal transitions cascade — clear dependents.
+  // Terminal transitions cascade — clear dependents. Inline, before the
+  // response: a dropped waitUntil would strand them (SPEC §8.5).
   if (target === 'done' || target === 'cancelled') {
-    c.executionCtx.waitUntil(resolveDependents(c.env, db, id).then(() => {}));
+    await resolveDependents(c.env, db, id);
   }
 
   const updated = await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get();
-  const dto = taskDto(updated!);
+  if (!updated) {
+    return c.json({ error: { code: 'not_found', message: 'Task not found' } }, 404);
+  }
+  const slug = await projectSlug(db, task.projectId);
+  const dto = taskDto(updated, slug);
   c.executionCtx.waitUntil(
     safeBroadcast(c.env, dto.projectId, { type: 'task.updated', task: dto }),
   );
@@ -186,10 +226,11 @@ tasksRoute.post('/tasks/:id/dependencies', async (c) => {
 
   const refreshed = await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get();
   if (refreshed) {
+    const slug = await projectSlug(db, refreshed.projectId);
     c.executionCtx.waitUntil(
       safeBroadcast(c.env, refreshed.projectId, {
         type: 'task.updated',
-        task: taskDto(refreshed),
+        task: taskDto(refreshed, slug),
       }),
     );
   }
@@ -227,10 +268,11 @@ tasksRoute.delete('/tasks/:id/dependencies/:blockerId', async (c) => {
 
   const refreshed = await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get();
   if (refreshed) {
+    const slug = await projectSlug(db, refreshed.projectId);
     c.executionCtx.waitUntil(
       safeBroadcast(c.env, refreshed.projectId, {
         type: 'task.updated',
-        task: taskDto(refreshed),
+        task: taskDto(refreshed, slug),
       }),
     );
   }
@@ -262,8 +304,9 @@ tasksRoute.post('/tasks/:id/comments', async (c) => {
     payload: { body: body.data.body },
     createdAt: new Date(),
   };
-  const inserted = await db.insert(schema.events).values(event).returning();
-  const dto = eventDto(inserted[0]!);
+  const [insertedEvent] = await db.insert(schema.events).values(event).returning();
+  if (!insertedEvent) throw new Error('insert returned no row');
+  const dto = eventDto(insertedEvent);
   // Look up projectId for the broadcast.
   const projectRow = await db
     .select({ projectId: schema.tasks.projectId })
@@ -285,16 +328,18 @@ tasksRoute.post('/tasks/:id/comments', async (c) => {
 tasksRoute.get('/tasks/:id/events', async (c) => {
   const db = getDb(c.env.DB);
   const id = c.req.param('id');
-  const limit = Math.min(Number.parseInt(c.req.query('limit') ?? '50', 10) || 50, 200);
+  const limit = Math.min(Math.max(Number.parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200);
   const before = c.req.query('before');
   const where = before
     ? and(eq(schema.events.taskId, id), lt(schema.events.id, before))
     : eq(schema.events.taskId, id);
+  // Order by id DESC — the ULID id is BOTH the sort key and the `before`
+  // cursor; sorting by a different column would skip/repeat rows (SPEC §6.2).
   const rows = await db
     .select()
     .from(schema.events)
     .where(where)
-    .orderBy(desc(schema.events.createdAt))
+    .orderBy(desc(schema.events.id))
     .limit(limit)
     .all();
   return c.json({ events: rows.map(eventDto) });

@@ -3,6 +3,12 @@
  * to connected SPA clients using the WebSocket Hibernation API (acceptWebSocket
  * / webSocketMessage / webSocketClose). See SPEC §10.
  *
+ * Heartbeats are hibernation-friendly (SPEC §10.4): clients send the literal
+ * string `ping` and the runtime auto-responds `pong` WITHOUT waking the DO
+ * (setWebSocketAutoResponse). Liveness is enforced by a low-frequency alarm
+ * (plus an opportunistic broadcast-time sweep) that closes sockets whose last
+ * auto-response is older than 90s — three missed 25s pings.
+ *
  * Each WebSocket carries a small attachment: the set of run IDs the client has
  * opted-in to log streaming for. Default subscription is task.* + event.* +
  * run.created/updated; run.log is per-run opt-in.
@@ -15,16 +21,27 @@ import type { Env } from '../lib/types';
 interface Attachment {
   projectId: string;
   subscribedRuns: string[];
-  lastPingAt: number;
+  /** Liveness fallback for sockets that haven't pinged yet (serialized at attach). */
+  attachedAt: number;
 }
 
-const PING_TIMEOUT_MS = 90_000;
+const PING_TIMEOUT_MS = 90_000; // 3 missed 25s client pings
+const SWEEP_INTERVAL_MS = 3 * 60_000;
 
 export class TasksRoom extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // The runtime answers heartbeats without waking a hibernated DO.
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === '/broadcast') {
+      if (request.method !== 'POST') {
+        return new Response('Method not allowed', { status: 405 });
+      }
       const message = (await request.json()) as ServerMessage;
       this.broadcast(message);
       return new Response(null, { status: 204 });
@@ -40,11 +57,12 @@ export class TasksRoom extends DurableObject<Env> {
     const attachment: Attachment = {
       projectId,
       subscribedRuns: [],
-      lastPingAt: Date.now(),
+      attachedAt: Date.now(),
     };
     server.serializeAttachment(attachment);
 
     this.ctx.acceptWebSocket(server);
+    await this.ensureSweepAlarm();
 
     server.send(
       JSON.stringify({
@@ -58,6 +76,8 @@ export class TasksRoom extends DurableObject<Env> {
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // Heartbeat 'ping' frames are answered by the runtime's auto-response and
+    // never reach this handler — everything arriving here is JSON.
     const text = typeof message === 'string' ? message : new TextDecoder().decode(message);
     let parsed: ClientMessage;
     try {
@@ -69,11 +89,6 @@ export class TasksRoom extends DurableObject<Env> {
     if (!att) return;
 
     switch (parsed.type) {
-      case 'ping':
-        att.lastPingAt = Date.now();
-        ws.serializeAttachment(att);
-        ws.send(JSON.stringify({ type: 'pong', t: parsed.t } satisfies ServerMessage));
-        break;
       case 'subscribe.run':
         if (!att.subscribedRuns.includes(parsed.runId)) {
           att.subscribedRuns = [...att.subscribedRuns, parsed.runId];
@@ -99,6 +114,45 @@ export class TasksRoom extends DurableObject<Env> {
     }
   }
 
+  /** Low-frequency liveness sweep; re-armed only while sockets remain. */
+  override async alarm(): Promise<void> {
+    this.sweepStaleSockets();
+    if (this.ctx.getWebSockets().length > 0) {
+      await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    }
+  }
+
+  private async ensureSweepAlarm(): Promise<void> {
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing == null) {
+      await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    }
+  }
+
+  /** When the client last proved liveness: last auto-pong, else attach time. */
+  private lastSeen(ws: WebSocket): number {
+    const autoPong = this.ctx.getWebSocketAutoResponseTimestamp(ws);
+    if (autoPong) return autoPong.getTime();
+    const att = ws.deserializeAttachment() as Attachment | null;
+    return att?.attachedAt ?? 0;
+  }
+
+  private isStale(ws: WebSocket): boolean {
+    return Date.now() - this.lastSeen(ws) > PING_TIMEOUT_MS;
+  }
+
+  private sweepStaleSockets(): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (this.isStale(ws)) {
+        try {
+          ws.close(1000, 'idle');
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
   /** Broadcast to all connected clients, applying per-message routing rules. */
   private broadcast(message: ServerMessage): void {
     const sockets = this.ctx.getWebSockets();
@@ -110,8 +164,8 @@ export class TasksRoom extends DurableObject<Env> {
       // run.log is opt-in.
       if (message.type === 'run.log' && !att.subscribedRuns.includes(message.runId)) continue;
 
-      // Drop sockets that haven't pinged recently — hibernation lets us scan cheaply.
-      if (Date.now() - att.lastPingAt > PING_TIMEOUT_MS) {
+      // Opportunistic liveness sweep — the 3-minute alarm is the backstop.
+      if (this.isStale(ws)) {
         try {
           ws.close(1000, 'idle');
         } catch {

@@ -31,7 +31,7 @@ const enc = new TextEncoder();
 function b64urlEncode(bytes: Uint8Array | ArrayBuffer): string {
   const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let s = '';
-  for (let i = 0; i < buf.length; i++) s += String.fromCharCode(buf[i]!);
+  for (const byte of buf) s += String.fromCharCode(byte);
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
@@ -74,18 +74,26 @@ export class RunTokenError extends Error {
   }
 }
 
-export async function verifyRunToken(
-  token: string,
-  secret: string,
-): Promise<RunTokenClaims> {
+/**
+ * Verify a run token. EVERY malformed input — bad structure, bad base64, bad
+ * JSON, bad claim shape — throws a typed RunTokenError (`malformed` |
+ * `bad_signature` | `expired`), never anything else: a garbage token must
+ * yield a 401, not a 500 (SPEC §7.2).
+ */
+export async function verifyRunToken(token: string, secret: string): Promise<RunTokenClaims> {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== VERSION) {
     throw new RunTokenError('malformed');
   }
   const [, payloadB64, sigB64] = parts as [string, string, string];
 
+  let sig: Uint8Array;
+  try {
+    sig = b64urlDecodeToBytes(sigB64);
+  } catch {
+    throw new RunTokenError('malformed'); // atob rejects non-base64 input
+  }
   const key = await importKey(secret);
-  const sig = b64urlDecodeToBytes(sigB64);
   const ok = await crypto.subtle.verify(
     'HMAC',
     key,
@@ -94,13 +102,26 @@ export async function verifyRunToken(
   );
   if (!ok) throw new RunTokenError('bad_signature');
 
-  let claims: RunTokenClaims;
+  let parsed: unknown;
   try {
-    claims = JSON.parse(new TextDecoder().decode(b64urlDecodeToBytes(payloadB64)));
+    parsed = JSON.parse(new TextDecoder().decode(b64urlDecodeToBytes(payloadB64)));
   } catch {
     throw new RunTokenError('malformed');
   }
-  if (typeof claims.exp !== 'number' || claims.exp * 1000 < Date.now()) {
+  // A valid MAC over a non-claims payload is still malformed (e.g. a token
+  // minted for a different purpose with the same secret).
+  if (
+    parsed === null ||
+    typeof parsed !== 'object' ||
+    typeof (parsed as RunTokenClaims).runId !== 'string' ||
+    typeof (parsed as RunTokenClaims).taskId !== 'string' ||
+    typeof (parsed as RunTokenClaims).projectId !== 'string' ||
+    typeof (parsed as RunTokenClaims).exp !== 'number'
+  ) {
+    throw new RunTokenError('malformed');
+  }
+  const claims = parsed as RunTokenClaims;
+  if (claims.exp * 1000 < Date.now()) {
     throw new RunTokenError('expired');
   }
   return claims;

@@ -8,8 +8,7 @@ import { useAuth } from '../lib/store';
 
 export function RootLayout() {
   const auth = useAuth((s) => s.auth);
-  const displayName =
-    auth.status === 'authenticated' ? auth.displayName : '…';
+  const displayName = auth.status === 'authenticated' ? auth.displayName : '…';
 
   return (
     <div className="shell">

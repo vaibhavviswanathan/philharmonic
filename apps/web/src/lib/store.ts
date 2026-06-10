@@ -7,9 +7,17 @@
  * Real-time wiring (WebSocket → store dispatch) lands in M3.
  */
 
-import { create } from 'zustand';
 import type { ServerMessage } from '@philharmonic/shared';
-import { api, type EventDto, type MeResponse, type ProjectDto, type RunDto, type TaskDto, type TaskStatus } from './api';
+import { create } from 'zustand';
+import {
+  type EventDto,
+  type MeResponse,
+  type ProjectDto,
+  type RunDto,
+  type TaskDto,
+  type TaskStatus,
+  api,
+} from './api';
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -143,8 +151,8 @@ export const useBoard = create<BoardStore>((set, get) => ({
         break;
       case 'run.log':
       case 'hello':
-      case 'pong':
-        // run.log handled by RunViewer; hello/pong are housekeeping
+        // run.log handled by RunViewer; hello is housekeeping. (The heartbeat
+        // pong is a raw string frame, dropped before it ever reaches here.)
         break;
     }
   },

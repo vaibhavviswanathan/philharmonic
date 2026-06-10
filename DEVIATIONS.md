@@ -1,47 +1,34 @@
 # Deviations from SPEC.md
 
-Per SPEC §0, anywhere this implementation deviates from the prescriptive spec
-gets recorded here so future readers can see why.
+Per SPEC §0 / §21, anywhere the implementation deviates from the prescriptive
+spec gets recorded here with reasoning, so future readers can see why.
 
-## D1 — Sandbox Dockerfile base image (M5)
+## Status
 
-**Spec (§13.1):** `FROM node:22-bookworm-slim`, install Node tools and the
-Claude CLI from a clean Debian base.
+**SPEC v2 absorbed every deviation recorded against v1**, so this ledger is
+currently empty. For the record, the absorbed entries were:
 
-**Implementation:** `FROM docker.io/cloudflare/sandbox:0.5.6`, then install
-the same extras on top.
+- **D1 — sandbox Dockerfile base image.** v1 prescribed `node:22-bookworm-slim`;
+  the implementation extends `cloudflare/sandbox` because the SDK's control
+  plane is a server inside that image. Now the spec'd behavior — SPEC v2 §13.1,
+  including the exact image-tag ↔ SDK-version pin.
+- **D2 — project name.** The spec was drafted as "Symphony"; the project is
+  Philharmonic. SPEC v2 is written against the real name throughout (original
+  OpenAI Symphony attribution preserved).
+- **D3 — migrations path.** Root `migrations/` written by drizzle-kit via a
+  relative `out` path from the worker package. Validated and folded into the
+  SPEC v2 repository-layout/data-model sections.
 
-**Reason:** the `@cloudflare/sandbox` SDK ships a control-plane server inside
-its container image. `sandbox.exec()`, file I/O, port exposure, and session
-management all talk to that server over a private wire protocol. A bare
-`node:22-bookworm-slim` image has no server, so `sandbox.exec()` would fail at
-runtime even though the image builds cleanly. The published image is small
-(it's still Debian + Node) so the cost of extending it is negligible.
+## Open deviations
 
-**Constraint:** the image tag here MUST match the `@cloudflare/sandbox`
-version pinned in `apps/worker/package.json`. Mismatched versions can drift
-on the wire protocol.
+_None. Add new entries below as they happen, using the template:_
 
-## D2 — Project name (Philharmonic vs Symphony)
+```
+## D<n> — <short title> (<milestone or task ID>)
 
-**Spec:** the spec was originally drafted with the product name "Symphony".
+**Spec (§<section>):** what the spec prescribes.
 
-**Implementation:** the project is called Philharmonic. The bulk rename
-covers the SPEC, README, WORKFLOW.md template, and bootstrap script. References
-to the original OpenAI Symphony (the project this was inspired by) are
-preserved in attribution links.
+**Implementation:** what was actually built.
 
-**Reason:** explicit user preference. The name change happened after the
-spec was written.
-
-## D3 — Path to migrations directory (M2)
-
-**Spec (§4):** `migrations/0000_initial.sql` at repo root.
-
-**Implementation:** same — but `apps/worker/drizzle.config.ts` writes to
-`../../migrations` because drizzle-kit runs from the worker package and
-needs a relative path.
-
-**Reason:** drizzle-kit doesn't read `wrangler.jsonc`'s `migrations_dir`
-field; it has its own `out` config. The relative path keeps the spec's root
-location while letting drizzle-kit live in the worker workspace.
+**Reason:** why the deviation was necessary or better.
+```

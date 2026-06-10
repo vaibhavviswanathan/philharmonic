@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { TaskCard } from './TaskCard';
-import { useBoard } from '../lib/store';
 import type { TaskDto, TaskStatus } from '../lib/api';
+import { useBoard } from '../lib/store';
+import { TaskCard } from './TaskCard';
 
 const TITLES: Record<TaskStatus, string> = {
   backlog: 'Backlog',
@@ -40,6 +40,9 @@ export function Column({
         setHover(false);
         const taskId = e.dataTransfer.getData('text/plain');
         if (!taskId) return;
+        // Dropping a card back onto its own column is a no-op (SPEC §9.1).
+        const current = useBoard.getState().tasks[taskId];
+        if (current && current.status === status) return;
         try {
           await transition(taskId, status);
         } catch (err) {

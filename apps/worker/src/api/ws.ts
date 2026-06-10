@@ -7,11 +7,11 @@
  * 401 here.
  */
 
-import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import { jsonError, verifyAccessJwt } from './auth';
+import { Hono } from 'hono';
 import { getDb, schema } from '../lib/db';
 import type { Env, Variables } from '../lib/types';
+import { jsonError, verifyAccessJwt } from './auth';
 
 export const wsRoute = new Hono<{ Bindings: Env; Variables: Variables }>();
 

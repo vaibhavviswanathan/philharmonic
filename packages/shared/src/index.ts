@@ -8,12 +8,17 @@ export type {
   TaskDto,
   RunDto,
   EventDto,
+  ArtifactDto,
+  TaskDetailResponse,
   CreateProjectRequest,
   UpdateProjectRequest,
   CreateTaskRequest,
   UpdateTaskRequest,
   TransitionTaskRequest,
   CreateCommentRequest,
+  AddDependencyRequest,
+  DeclareDependencyRequest,
+  DeclareDependencyResponse,
 } from './api-types.js';
 
 export type {

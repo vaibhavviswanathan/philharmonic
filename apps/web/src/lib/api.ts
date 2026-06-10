@@ -1,92 +1,59 @@
 /**
  * Thin fetch wrapper. The Worker is same-origin, so no base URL is needed.
  * REST surface described in SPEC §8; this file holds typed helpers.
+ *
+ * Domain DTO types come from @philharmonic/shared (single source of truth);
+ * only web-only view/response shapes are declared locally.
  */
 
-export type ApiError = {
-  error: {
-    code: string;
-    message: string;
-  };
+import type {
+  ApiError,
+  ArtifactDto,
+  ArtifactKind,
+  EventDto,
+  EventType,
+  ProjectDto,
+  RunDto,
+  RunStatus,
+  TaskDetailResponse,
+  TaskDto,
+  TaskStatus,
+} from '@philharmonic/shared';
+
+export type {
+  ApiError,
+  ArtifactDto,
+  ArtifactKind,
+  EventDto,
+  EventType,
+  ProjectDto,
+  RunDto,
+  RunStatus,
+  TaskDetailResponse,
+  TaskDto,
+  TaskStatus,
 };
 
+/** Web-only: /api/me has no shared DTO (the SPA is its only consumer). */
 export type MeResponse =
   | { setupRequired: true; hint: string }
   | { setupRequired?: false; email: string; displayName: string };
 
-export type TaskStatus =
-  | 'backlog'
-  | 'blocked'
-  | 'ready'
-  | 'running'
-  | 'review'
-  | 'done'
-  | 'cancelled';
+/**
+ * Typed request failure. `code` is the API's structured error code when the
+ * body was parseable JSON, otherwise `http_<status>` with the raw body text
+ * as the message (SPEC §9.3 — never throw a raw SyntaxError on HTML edge pages).
+ */
+export class ApiRequestError extends Error {
+  readonly code: string;
+  readonly status: number;
 
-export type RunStatus =
-  | 'queued'
-  | 'preparing'
-  | 'running'
-  | 'landing'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled';
-
-export type EventType =
-  | 'comment'
-  | 'status_change'
-  | 'agent_action'
-  | 'proof'
-  | 'system';
-
-export interface ProjectDto {
-  id: string;
-  name: string;
-  slug: string;
-  repoUrl: string;
-  defaultBranch: string;
-  workflowMd: string;
-  concurrencyLimit: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface TaskDto {
-  id: string;
-  projectId: string;
-  number: number;
-  identifier: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  priority: number;
-  createdBy: string;
-  assignee: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface RunDto {
-  id: string;
-  taskId: string;
-  workflowInstanceId: string | null;
-  sandboxId: string;
-  status: RunStatus;
-  prUrl: string | null;
-  errorMessage: string | null;
-  startedAt: number | null;
-  endedAt: number | null;
-  createdAt: number;
-}
-
-export interface EventDto {
-  id: string;
-  taskId: string;
-  runId: string | null;
-  type: EventType;
-  author: string;
-  payload: Record<string, unknown>;
-  createdAt: number;
+  constructor(code: string, message: string, status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.code = code;
+    this.status = status;
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -100,10 +67,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: 'include',
   });
   const text = await res.text();
-  const body = text ? (JSON.parse(text) as unknown) : null;
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null; // non-JSON body (HTML edge page, plain text, …)
+    }
+  }
   if (!res.ok) {
     const err = body as ApiError | null;
-    throw new Error(err?.error?.message ?? `Request failed (${res.status})`);
+    if (err && typeof err.error?.message === 'string') {
+      throw new ApiRequestError(
+        err.error.code || `http_${res.status}`,
+        err.error.message,
+        res.status,
+      );
+    }
+    throw new ApiRequestError(
+      `http_${res.status}`,
+      text.trim() || `Request failed (${res.status})`,
+      res.status,
+    );
   }
   return body as T;
 }
@@ -138,13 +123,7 @@ export const api = {
     projectId: string,
     body: { title: string; description?: string; priority?: number },
   ) => request<{ task: TaskDto }>(`/api/projects/${projectId}/tasks`, json(body)),
-  getTask: (id: string) =>
-    request<{
-      task: TaskDto;
-      latestRun: RunDto | null;
-      blockers: TaskDto[];
-      blocking: TaskDto[];
-    }>(`/api/tasks/${id}`),
+  getTask: (id: string) => request<TaskDetailResponse>(`/api/tasks/${id}`),
   addDependency: (id: string, blockedBy: string) =>
     request<{ ok: true }>(`/api/tasks/${id}/dependencies`, json({ blockedBy })),
   removeDependency: (id: string, blockerId: string) =>
@@ -158,28 +137,7 @@ export const api = {
   listEvents: (id: string) => request<{ events: EventDto[] }>(`/api/tasks/${id}/events`),
   listRuns: (id: string) => request<{ runs: RunDto[] }>(`/api/tasks/${id}/runs`),
 
-  getRun: (id: string) =>
-    request<{ run: RunDto; artifacts: ArtifactDto[] }>(`/api/runs/${id}`),
+  getRun: (id: string) => request<{ run: RunDto; artifacts: ArtifactDto[] }>(`/api/runs/${id}`),
   cancelRun: (id: string) => request<{ ok: true }>(`/api/runs/${id}/cancel`, json({})),
-  artifactUrl: (runId: string, artifactId: string) =>
-    `/api/runs/${runId}/artifacts/${artifactId}`,
+  artifactUrl: (runId: string, artifactId: string) => `/api/runs/${runId}/artifacts/${artifactId}`,
 };
-
-export type ArtifactKind =
-  | 'pr_diff'
-  | 'screenshot'
-  | 'video'
-  | 'logs'
-  | 'ci_summary'
-  | 'other';
-
-export interface ArtifactDto {
-  id: string;
-  runId: string;
-  kind: ArtifactKind;
-  r2Key: string;
-  mime: string;
-  sizeBytes: number;
-  caption: string | null;
-  createdAt: number;
-}

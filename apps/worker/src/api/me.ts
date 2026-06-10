@@ -4,8 +4,8 @@
  */
 
 import { Hono } from 'hono';
-import { jsonError, verifyAccessJwt } from './auth';
 import type { Env, Variables } from '../lib/types';
+import { jsonError, verifyAccessJwt } from './auth';
 
 export const meRoute = new Hono<{ Bindings: Env; Variables: Variables }>();
 

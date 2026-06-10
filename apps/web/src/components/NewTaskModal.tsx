@@ -32,25 +32,31 @@ export function NewTaskModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onClose();
+      }}
+    >
+      <form
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose();
+        }}
+        onSubmit={submit}
+      >
         <h2>New task</h2>
         <label>
           Title
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            required
-            autoFocus
-          />
+          {/* biome-ignore lint/a11y/noAutofocus: focusing the only required field is the point of this modal */}
+          <input value={title} onChange={(e) => setTitle(e.target.value)} required autoFocus />
         </label>
         <label>
           Description
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={6}
-          />
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={6} />
         </label>
         <label>
           Priority

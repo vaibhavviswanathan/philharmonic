@@ -9,3 +9,4 @@ dist/
 .vite/
 .DS_Store
 *.log
+wrangler.dev.jsonc

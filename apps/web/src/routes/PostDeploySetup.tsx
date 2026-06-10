@@ -28,7 +28,8 @@ export function PostDeploySetup({ hint }: { hint: string }) {
             <strong>Application URL:</strong> the hostname of this Worker
           </li>
           <li>
-            <strong>Identity providers:</strong> at least one (Google, GitHub, email OTP — your call)
+            <strong>Identity providers:</strong> at least one (Google, GitHub, email OTP — your
+            call)
           </li>
         </ul>
       </section>
@@ -36,8 +37,8 @@ export function PostDeploySetup({ hint }: { hint: string }) {
       <section>
         <h2>2. Copy the Access team domain and audience tag</h2>
         <p>
-          From <em>Settings → Custom Pages → Login URL</em> grab the team domain
-          (looks like <code>https://your-team.cloudflareaccess.com</code>). From the application's
+          From <em>Settings → Custom Pages → Login URL</em> grab the team domain (looks like{' '}
+          <code>https://your-team.cloudflareaccess.com</code>). From the application's
           <em> overview tab</em> copy the AUD tag (a long hex string).
         </p>
       </section>
@@ -45,11 +46,11 @@ export function PostDeploySetup({ hint }: { hint: string }) {
       <section>
         <h2>3. Set the vars and re-deploy</h2>
         <pre>
-{`# wrangler.jsonc → vars
+          {`# wrangler.jsonc → vars
 "ACCESS_TEAM_DOMAIN": "https://your-team.cloudflareaccess.com",
 "ACCESS_AUD": "your_application_aud_tag"
 
-pnpm deploy`}
+pnpm run deploy`}
         </pre>
       </section>
 

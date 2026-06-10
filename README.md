@@ -18,91 +18,140 @@ You file a task  →  click Run  →  Sandbox spins up  →  Claude implements  
                        └──────── live updates over WebSocket ◄────────────────┘
 ```
 
-- **Task tracker** — kanban board with backlog / ready / running / review / done columns
+- **Task tracker** — kanban board with backlog / blocked / ready / running / review / done columns
 - **Auth** — Cloudflare Access (Google, GitHub, email OTP — all without writing login code)
-- **Agent runtime** — Claude Agent SDK running headless inside a Cloudflare Sandbox container, one container per task
+- **Agent runtime** — Claude Code running headless inside a Cloudflare Sandbox container, one container per task
 - **Orchestration** — Cloudflare Workflows for durable, resumable, multi-hour runs
 - **Real-time UI** — Durable Objects + WebSocket Hibernation
-- **Credentials** — never enter the agent. Injected at the network edge by an outbound Worker.
+- **Credentials** — never enter the agent's container. Injected at the network edge by outbound handlers on the sandbox's host Worker.
 
 ---
 
-## Quick start (one-click)
+## Prerequisites
 
-1. Click **Deploy to Cloudflare** above.
-2. Cloudflare forks this repo into your GitHub, provisions D1 / R2 / Queues / Secrets Store, and prompts you for two secrets:
-   - `ANTHROPIC_API_KEY` — get one at <https://console.anthropic.com>
-   - `GITHUB_TOKEN` — a fine-grained PAT with `repo` and `pull_request` scopes for the repos Philharmonic will work on
-3. Wait for the build (~3 minutes — first build pulls the sandbox container image).
-4. Open the deployed URL. You'll land on a **Post-Deploy Setup** screen that walks you through:
-   - Putting Cloudflare Access in front of your Worker
-   - Setting `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in your Worker's vars
-   - Re-deploying to pick up those values
-5. Log in. Create a project. File a task. Click Run. Watch it work.
+- A **Cloudflare account** — the control plane runs on the free plan; **Workers Paid** is required for Containers and Workflows (the agent runtime)
+- An **Anthropic API key** — get one at <https://console.anthropic.com>
+- A **GitHub fine-grained PAT** with `repo` and `pull_request` scopes for the repos Philharmonic will work on
+- **Node 22+**, **pnpm 9+**
+- **Docker** — the sandbox container image is built on your machine during deploy (`wrangler deploy` invokes Docker for `containers/sandbox/Dockerfile`)
 
-## Quick start (manual)
+## Install
 
-If you'd rather run the install locally:
+### Path A — Deploy button (control plane)
+
+The **Deploy to Cloudflare** button forks this repo into your GitHub account, provisions the control-plane resources declared in `wrangler.jsonc` (D1, R2, Queues, Durable Objects, Secrets Store), prompts you for the three secrets, builds, deploys, and connects your fork to Workers Builds for CI.
+
+**The honest caveat:** the button's auto-provisioner does **not** cover Containers or Workflows, and the sandbox container image is built by `wrangler deploy` *locally with Docker* — a build environment the button doesn't have. A button install gets you the app, the board, and the API, but agent runs need one full deploy from a machine with Docker. To finish:
+
+```sh
+git clone https://github.com/YOUR_GITHUB/philharmonic   # your fork
+cd philharmonic
+pnpm install
+npx wrangler login
+pnpm bootstrap        # idempotent — verifies/fills anything the button missed (e.g. the DLQ)
+pnpm run deploy       # Docker must be running
+```
+
+### Path B — Manual (the canonical full-stack path)
 
 ```sh
 git clone https://github.com/YOUR_ORG/philharmonic
 cd philharmonic
 pnpm install
-pnpm bootstrap         # creates D1, R2, queues, sets all secrets
-pnpm deploy
+npx wrangler login
+pnpm bootstrap        # creates D1, R2, queues, Secrets Store; prompts for secrets; migrates
+pnpm run deploy       # builds the SPA + container image, deploys the Worker
 ```
 
-Then complete the Access configuration as in step 4 above.
+> Always `pnpm run deploy` — bare `pnpm deploy` is a reserved pnpm built-in and does not run the package script.
 
----
+### Then: Cloudflare Access (both paths)
 
-## What you need
+Open the deployed URL. You'll land on a **Post-Deploy Setup** screen that walks you through the one thing Cloudflare can't automate:
 
-- A Cloudflare account (free plan works for the control plane; Workers Paid is required for Containers and Workflows at production volume)
-- An Anthropic API key
-- A GitHub fine-grained PAT for the repos you want Philharmonic to work on (or a GitHub App if you'd rather)
-- For the manual path: Node 22+, pnpm 9+, Wrangler 4+
+1. In the Cloudflare dashboard, create an **Access application** pointed at your Worker's hostname (`philharmonic.YOUR-SUBDOMAIN.workers.dev`).
+2. Copy your **team domain** — it must include the scheme, e.g. `https://yourteam.cloudflareaccess.com` — and the application's **Audience (AUD) tag**.
+3. Set them as `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in `wrangler.jsonc` `vars`.
+4. Re-run `pnpm run deploy`, then hit "I'm done — re-check" on the setup screen.
+
+Log in. Create a project. File a task. Click Run. Watch it work.
 
 ## What gets created in your account
 
 | Resource | Name | Purpose |
 |---|---|---|
-| Worker | `philharmonic` | The whole app — API, SPA, Durable Objects, Workflow, queue consumer |
-| D1 database | `philharmonic` | Tasks, runs, events, artifacts |
-| R2 bucket | `philharmonic-artifacts` | PR diffs, screenshots, walkthrough videos, sandbox snapshots |
-| Queue | `philharmonic-dispatch` (+ DLQ) | Decouples task-ready from agent dispatch |
-| Container | (via Sandbox SDK) | One per task; Linux env with Claude CLI, git, gh |
-| Secrets Store | `philharmonic-secrets` | All four secrets, never in the repo |
+| Worker | `philharmonic` | The whole app — API, SPA, Durable Objects, Workflow, queue consumer, egress handlers |
+| D1 database | `philharmonic` | Projects, tasks, runs, events, artifacts, dependencies |
+| R2 bucket | `philharmonic-artifacts` | PR diffs, screenshots, logs, uploaded proof of work |
+| Queues | `philharmonic-dispatch` + `philharmonic-dispatch-dlq` | Decouples task-ready from agent dispatch |
+| Container | (via Sandbox SDK) | One per task; Linux env with Claude Code, git, gh |
+| Secrets Store | `philharmonic-secrets` | The three secrets below, never in the repo |
 
-## What does NOT get created automatically
+### Secrets
 
-- **Cloudflare Access application** — you set this up manually in the dashboard. The PostDeploySetup screen walks you through it.
-- **Custom domain** — optional. The default `philharmonic.YOUR-SUBDOMAIN.workers.dev` works fine to start.
-- **GitHub App** — if you want to upgrade from a PAT to a proper GitHub App, see `docs/github-app.md`.
+| Name | Source | Purpose |
+|---|---|---|
+| `RUN_TOKEN_SECRET` | generated by bootstrap | HMAC key for the short-lived run tokens agents use to call back into the API |
+| `ANTHROPIC_API_KEY` | you, prompted | Claude API key — read only by the egress handler |
+| `GITHUB_TOKEN` | you, prompted | Fine-grained PAT — read only by the egress handler |
+
+Rotate with `pnpm bootstrap --rotate` — regenerates `RUN_TOKEN_SECRET` and re-prompts for the external credentials. In-flight runs will fail when they next hit the API; drain first if that matters.
+
+### What does NOT get created automatically
+
+- **Cloudflare Access application** — manual, see above. The PostDeploySetup screen walks you through it.
+- **Custom domain** — optional. The default `*.workers.dev` hostname works fine to start.
 
 ---
 
-## Configuration
-
-### Per-project `WORKFLOW.md`
-
-Each project has a `WORKFLOW.md` — the prompt template the agent uses for that project. Edit it from the project settings page in Philharmonic itself; changes take effect on the next run with no redeploy.
-
-The default template is in `containers/sandbox/WORKFLOW.md`.
-
-Available template variables: see comments at the top of that file.
-
-### Concurrency limits
-
-Per-project, set in the project settings page. Default is 2 simultaneous agent runs. Increase if you trust your repo's CI to handle the parallel PRs; decrease if your CI is slow or expensive.
-
-### Rotating secrets
+## Local development
 
 ```sh
-pnpm bootstrap --rotate
+pnpm install
+pnpm build            # builds the SPA — wrangler dev serves apps/web/dist
+pnpm migrate:local    # applies migrations to the local D1 database
+pnpm seed             # optional: demo project + sample tasks
+pnpm dev              # http://localhost:8787
 ```
 
-Generates fresh `RUN_TOKEN_SECRET` and `INTERNAL_API_TOKEN`, re-prompts for the external credentials. Existing in-flight runs will fail when they hit the API — drain first if that matters.
+What `pnpm dev` actually does: it runs `scripts/dev.ts`, which copies `wrangler.jsonc` to a generated `wrangler.dev.jsonc` with the empty resource IDs filled in by local placeholders (miniflare refuses empty IDs), then runs `wrangler dev` against it. `migrate:local` and `seed` target the same generated config so they hit the same local database. Extra flags pass through: `pnpm dev -- --port 8888`.
+
+Notes:
+
+- Rebuild the SPA (`pnpm build`) after frontend changes, or run `pnpm --filter @philharmonic/web dev` alongside for Vite HMR.
+- **Docker** must be running to exercise sandbox/agent runs locally (wrangler builds and runs the container image). For UI/API-only work: `pnpm dev -- --no-containers`.
+- Access is bypassed in local dev only in the sense that `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` are empty — you'll see the PostDeploySetup screen behavior, which is the expected setup-mode state.
+
+## CI/CD
+
+`.github/workflows/deploy.yml` deploys on every push to `main`. It needs two repository secrets (Settings → Secrets and variables → Actions):
+
+- `CLOUDFLARE_API_TOKEN` — Workers (incl. Containers/Workflows), D1, R2, Queues edit permissions
+- `CLOUDFLARE_ACCOUNT_ID`
+
+GitHub-hosted Ubuntu runners have Docker preinstalled, so the container image builds in CI out of the box.
+
+**Deploy-button forks:** the button also connects your fork to **Cloudflare Workers Builds**, which deploys on push too. Running both means every push deploys twice. Pick one — add the secrets above and disconnect Workers Builds in the Cloudflare dashboard, or keep Workers Builds and delete the workflow file.
+
+---
+
+## Using it
+
+**Projects.** A project = a GitHub repo + settings + a `WORKFLOW.md` prompt template. Create one from the project list; tasks get per-project identifiers like `WEB-12` (uppercased slug + number).
+
+**Tasks and the run lifecycle.** Tasks move `backlog → ready → running → review → done` (plus `cancelled`, and `blocked` — below). Moving a card to **Ready** queues it; the orchestrator starts a run as soon as a concurrency slot is free (default 2 per project, adjustable in settings — a task waiting on a slot waits indefinitely, it is never dropped). The agent clones the repo into a per-task sandbox, posts its plan as a comment, implements, opens a PR titled `<IDENTIFIER>: <summary>`, attaches proof of work, and lands the task in **Review**. You review the PR and the artifacts on the card, then **Approve & merge** (→ done) or **Send back** (→ ready) with a comment.
+
+**Dependencies and the Blocked column.** Any task can be blocked by other tasks in the same project (cycles are rejected). A task with unresolved blockers sits in **Blocked** — the column is hidden behind a "Show blocked (n)" toggle, and blocked cards carry a lock badge. When the last blocker resolves (done *or* cancelled — a moot blocker shouldn't hold work hostage), the task auto-moves to ready and dispatches itself. The agent can declare dependencies too: if it discovers mid-run that the task depends on incomplete work, it declares the blocker and exits; the run ends as **deferred** (freeing the concurrency slot), the task parks in blocked, and it re-dispatches automatically when the blocker resolves.
+
+**Proof of work.** Each run attaches evidence to the task card: the PR link, a `pr_diff` artifact, the full agent log, plus any screenshots or files the agent uploads. Review the evidence, not a chain-of-thought transcript.
+
+## Customizing `WORKFLOW.md`
+
+Each project has a `WORKFLOW.md` — the prompt template rendered for the agent on every run. The default lives at [`containers/sandbox/WORKFLOW.md`](./containers/sandbox/WORKFLOW.md) and seeds every new project; after that, each project's copy is independent.
+
+- **Where to edit:** the project settings page in Philharmonic itself.
+- **When it takes effect:** the next run. No redeploy.
+- **Template variables:** `{{ project.name }}`, `{{ project.repoUrl }}`, `{{ project.defaultBranch }}`, `{{ task.identifier }}`, `{{ task.title }}`, `{{ task.description }}`, `{{ task.priority }}`, `{{ task.createdBy }}`, `{{ task.createdAt }}`, `{{ run.id }}`, `{{ run.attempt }}` — plus `{{#if (gt path N)}}…{{/if}}` conditionals. The comment frontmatter at the top of the file documents them and is stripped from the rendered prompt.
 
 ---
 
@@ -110,21 +159,29 @@ Generates fresh `RUN_TOKEN_SECRET` and `INTERNAL_API_TOKEN`, re-prompts for the 
 
 See [`SPEC.md`](./SPEC.md) for the full spec. Short version:
 
-- The Worker serves the React SPA, the JSON API (`/api/*`), the agent-internal API (`/api/internal/*`), and a WebSocket (`/ws/projects/:id`) all from one binary.
-- A singleton **Orchestrator Durable Object** consumes the dispatch queue and decides when to start runs.
-- Each run is a **Cloudflare Workflow** instance, durable across restarts and able to sleep for hours waiting on CI.
-- The agent runs as headless Claude Code inside a **Sandbox SDK container** with `task_id` as its sandbox ID — so the same task always reuses the same workspace.
-- A **TasksRoom Durable Object** per project fans out live updates to connected browsers using the WebSocket Hibernation API.
-- An **outbound Worker** intercepts every HTTP request from the sandbox and injects credentials at the network layer. The agent never sees a token.
+- One Worker serves the React SPA, the JSON API (`/api/*`), the agent-internal API (`/api/internal/*`), and WebSockets (`/ws/projects/:slug`).
+- A singleton **Orchestrator Durable Object** consumes the dispatch queue and owns task claiming and concurrency limits.
+- Each run is a **Cloudflare Workflow** instance — durable across restarts and able to wait out multi-hour work.
+- The agent runs as headless Claude Code inside a **Sandbox SDK container** keyed by `task_id`, so a task always reuses its workspace.
+- A **TasksRoom Durable Object** per project fans out live updates over the WebSocket Hibernation API.
+- Egress: the **Sandbox class's outbound handlers** intercept the container's HTTP(S) traffic at the edge, enforce a host allowlist, and inject `GITHUB_TOKEN` / `ANTHROPIC_API_KEY` into requests to GitHub/Anthropic. The container only ever sees placeholder values — the agent can never leak a credential it never had.
 
----
+## Troubleshooting
+
+**The setup screen keeps coming back.** `/api/me` returns `setupRequired` until both `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are non-empty *in the deployed Worker*. Check: you set them in `wrangler.jsonc` `vars` (not as secrets), `ACCESS_TEAM_DOMAIN` includes `https://`, and you re-ran `pnpm run deploy` after setting them.
+
+**The agent can't authenticate / `gh` or `git push` fails inside a run.** The container intentionally has only placeholder credentials; real tokens are injected at the edge for allowlisted hosts (github.com, api.anthropic.com, registry.npmjs.org, …). If the agent needs another host — a private package registry, an internal API — the egress allowlist is blocking it: add the host to `allowedHosts` in the Sandbox class (`apps/worker/src/sandbox/`) and redeploy. Also verify your `GITHUB_TOKEN` actually has access to the project's repo.
+
+**A task is stuck in Blocked.** If it has unresolved blockers (lock badge → task page → "Blocked by"), finish or cancel them — resolution auto-unblocks dependents. A blocked task with *zero* dependencies is **manually parked**: nothing will ever auto-resume it (the page says so) — move it back to ready yourself.
+
+**Messages in `philharmonic-dispatch-dlq`.** The dead-letter queue collects dispatch messages that genuinely failed five times — it is *not* where tasks waiting on a concurrency slot go (those wait in the main queue indefinitely). Anything in the DLQ means dispatch crashed repeatedly: check the Worker logs, fix the cause, then move the affected tasks back through ready.
 
 ## Limits and trade-offs
 
 - Single-tenant. Philharmonic is designed to be deployed per team, not as multi-tenant SaaS.
 - Claude only. Not multi-LLM. If you want a different model, fork and swap.
 - Web UI only. No CLI client.
-- The agent is non-interactive. It never asks you a question mid-run; if it's stuck it documents the ambiguity in its PR description and you decide on review.
+- The agent is non-interactive. It never asks you a question mid-run; if it's stuck it documents the ambiguity in its PR description (or declares a dependency and defers) and you decide on review.
 
 ---
 
@@ -142,4 +199,4 @@ MIT — see [`LICENSE`](./LICENSE).
 
 - Architecture pattern from OpenAI's [Symphony](https://github.com/openai/symphony)
 - Built on [Cloudflare Workers](https://workers.cloudflare.com), [Durable Objects](https://developers.cloudflare.com/durable-objects/), [Sandbox SDK](https://developers.cloudflare.com/sandbox/), and [Workflows](https://developers.cloudflare.com/workflows/)
-- Powered by [Claude](https://claude.com) via the Claude Agent SDK
+- Powered by [Claude](https://claude.com) via Claude Code
