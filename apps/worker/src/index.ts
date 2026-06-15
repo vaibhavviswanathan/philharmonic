@@ -10,20 +10,22 @@
  */
 
 import { Hono } from 'hono';
+import { accessAuthMiddleware } from './api/auth';
+import { internalRoute } from './api/internal';
 import { meRoute } from './api/me';
 import { projectsRoute } from './api/projects';
-import { tasksRoute } from './api/tasks';
 import { runsRoute } from './api/runs';
-import { internalRoute } from './api/internal';
+import { tasksRoute } from './api/tasks';
 import { wsRoute } from './api/ws';
-import { accessAuthMiddleware } from './api/auth';
-import { handleDispatchQueue } from './queue/consumer';
 import type { DispatchMessage } from './do/Orchestrator';
 import type { Env, Variables } from './lib/types';
+import { handleDispatchQueue } from './queue/consumer';
 
 export { TasksRoom } from './do/TasksRoom';
 export { Orchestrator } from './do/Orchestrator';
-export { Sandbox } from './sandbox/Sandbox';
+// ContainerProxy must be exported from the entrypoint — the Sandbox DO resolves
+// it via ctx.exports to build outbound-interception fetchers (SPEC §15).
+export { Sandbox, ContainerProxy } from './sandbox/Sandbox';
 export { ImplementationRun } from './workflow/ImplementationRun';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();

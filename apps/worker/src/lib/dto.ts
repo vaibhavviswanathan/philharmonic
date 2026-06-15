@@ -3,13 +3,7 @@
  * transform so the wire shape can evolve independently from the DB schema.
  */
 
-import type {
-  Artifact,
-  Event,
-  Project,
-  Run,
-  Task,
-} from './schema';
+import type { Artifact, Event, Project, Run, Task } from './schema';
 
 export function projectDto(row: Project) {
   return {
@@ -25,12 +19,22 @@ export function projectDto(row: Project) {
   };
 }
 
-export function taskDto(row: Task) {
+/**
+ * Task identifier derivation — SPEC §6.2: `UPPER(project.slug)-number`
+ * (e.g. slug `web-app`, number 7 → `WEB-APP-7`). The single source for the
+ * DTO mapper, the workflow prompt renderer, and the agent-reference parser
+ * in the internal dependencies endpoint. Never hardcode a prefix.
+ */
+export function taskIdentifier(projectSlug: string, number: number): string {
+  return `${projectSlug.toUpperCase()}-${number}`;
+}
+
+export function taskDto(row: Task, projectSlug: string) {
   return {
     id: row.id,
     projectId: row.projectId,
     number: row.number,
-    identifier: `PHIL-${row.number}`,
+    identifier: taskIdentifier(projectSlug, row.number),
     title: row.title,
     description: row.description,
     status: row.status,

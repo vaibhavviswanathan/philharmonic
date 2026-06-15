@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type TaskDto } from '../lib/api';
+import { type TaskDto, api } from '../lib/api';
 
 /**
  * Minimal "add a blocker" picker. Lists every task in the same project except
@@ -61,10 +61,25 @@ export function DependencyPicker({
   );
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal dep-picker" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onClose();
+      }}
+    >
+      <div
+        className="modal dep-picker"
+        role="presentation"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose();
+        }}
+      >
         <h2>Add a blocker</h2>
         <input
+          // biome-ignore lint/a11y/noAutofocus: focusing the search box is the point of this picker
           autoFocus
           placeholder="Search by ID or title…"
           value={filter}

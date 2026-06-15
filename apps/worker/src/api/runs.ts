@@ -1,16 +1,20 @@
 /**
- * /api/runs/:id — run detail with artifacts. POST /:id/cancel terminates the
- * Workflow + sandbox; full cancel implementation lands in M8.
+ * /api/runs/:id — run detail with artifacts, proxied artifact download, and
+ * POST /:id/cancel via the shared cancel helper (terminate Workflow + destroy
+ * sandbox + persist; SPEC §8.1/§12.2).
  */
 
+import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { getSandbox } from '@cloudflare/sandbox';
-import { eq } from 'drizzle-orm';
 import { ulid } from 'ulid';
-import { getDb, schema } from '../lib/db';
-import { artifactDto, runDto } from '../lib/dto';
 import { safeBroadcast } from '../lib/broadcast';
+import { cancelRun } from '../lib/cancel';
+import { getDb, projectSlug, schema } from '../lib/db';
+import { gateReadyTransition } from '../lib/dependencies';
+import { artifactDto, runDto, taskDto } from '../lib/dto';
 import type { Env, Variables } from '../lib/types';
+
+const ACTIVE_RUN_STATUSES = ['queued', 'preparing', 'running', 'landing'] as const;
 
 export const runsRoute = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -62,40 +66,40 @@ runsRoute.post('/runs/:id/cancel', async (c) => {
   if (!run) {
     return c.json({ error: { code: 'not_found', message: 'Run not found' } }, 404);
   }
-  const now = new Date();
-  const wasActive = ['queued', 'preparing', 'running', 'landing'].includes(run.status);
+  // No cancelling finished work — succeeded/failed/cancelled/deferred are terminal.
+  if (!ACTIVE_RUN_STATUSES.includes(run.status as (typeof ACTIVE_RUN_STATUSES)[number])) {
+    return c.json(
+      { error: { code: 'run_terminal', message: `Run is already ${run.status}.` } },
+      409,
+    );
+  }
 
-  // 1) Terminate the Workflow if one is attached.
-  if (run.workflowInstanceId) {
-    try {
-      const inst = await c.env.RUN.get(run.workflowInstanceId);
-      await inst.terminate();
-    } catch (err) {
-      console.warn('workflow terminate failed:', err);
+  const task = await db.select().from(schema.tasks).where(eq(schema.tasks.id, run.taskId)).get();
+  const now = new Date();
+
+  // 1) Terminate Workflow + destroy sandbox + persist cancelled + broadcast
+  //    run.updated — the shared helper (SPEC §12.2). Returns undefined when
+  //    the run reached a terminal status first (helper write is a CAS).
+  const cancelled = await cancelRun(c.env, db, run, { now, projectId: task?.projectId });
+
+  // 2) Reset the task through the blocker gate (§1's law) and re-enqueue if
+  //    it lands ready. CAS on `running`: the task read above is stale by the
+  //    seconds cancelRun took — an agent-set `review` landing in that window
+  //    must not be dragged back to ready (§12.2). When cancelRun lost the
+  //    race entirely, the Workflow's finish/mark-failed owns the hand-off.
+  if (cancelled && task) {
+    const target = await gateReadyTransition(db, task.id);
+    const reset = await db
+      .update(schema.tasks)
+      .set({ status: target, updatedAt: now })
+      .where(and(eq(schema.tasks.id, task.id), eq(schema.tasks.status, 'running')))
+      .returning();
+    if (reset[0] && target === 'ready') {
+      await c.env.DISPATCH.send({ taskId: task.id, projectId: task.projectId });
     }
   }
 
-  // 2) Destroy the sandbox (sandbox_id == task_id for v1).
-  try {
-    const sandbox = getSandbox(c.env.Sandbox, run.sandboxId);
-    await sandbox.destroy();
-  } catch (err) {
-    console.warn('sandbox destroy failed:', err);
-  }
-
-  // 3) Persist cancellation + reset task to ready (if it was active).
-  await db
-    .update(schema.runs)
-    .set({ status: 'cancelled', endedAt: now })
-    .where(eq(schema.runs.id, id));
-  if (wasActive) {
-    await db
-      .update(schema.tasks)
-      .set({ status: 'ready', updatedAt: now })
-      .where(eq(schema.tasks.id, run.taskId));
-  }
-
-  // 4) Audit trail + broadcast.
+  // 3) Audit trail + broadcast.
   await db.insert(schema.events).values({
     id: ulid(),
     taskId: run.taskId,
@@ -106,29 +110,17 @@ runsRoute.post('/runs/:id/cancel', async (c) => {
     createdAt: now,
   });
 
-  const task = await db
+  const refreshed = await db
     .select()
     .from(schema.tasks)
     .where(eq(schema.tasks.id, run.taskId))
     .get();
-  if (task) {
+  if (refreshed) {
+    const slug = await projectSlug(db, refreshed.projectId);
     c.executionCtx.waitUntil(
-      safeBroadcast(c.env, task.projectId, {
+      safeBroadcast(c.env, refreshed.projectId, {
         type: 'task.updated',
-        task: {
-          id: task.id,
-          projectId: task.projectId,
-          number: task.number,
-          identifier: `PHIL-${task.number}`,
-          title: task.title,
-          description: task.description,
-          status: task.status,
-          priority: task.priority,
-          createdBy: task.createdBy,
-          assignee: task.assignee,
-          createdAt: task.createdAt.getTime(),
-          updatedAt: task.updatedAt.getTime(),
-        },
+        task: taskDto(refreshed, slug),
       }),
     );
   }

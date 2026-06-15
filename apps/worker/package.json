@@ -7,10 +7,11 @@
   "scripts": {
     "build": "echo 'worker is bundled by wrangler at deploy time; nothing to build'",
     "typecheck": "tsc --noEmit",
-    "drizzle:generate": "drizzle-kit generate"
+    "drizzle:generate": "drizzle-kit generate",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "^0.5.0",
+    "@cloudflare/sandbox": "0.12.1",
     "@philharmonic/shared": "workspace:*",
     "drizzle-orm": "^0.36.4",
     "hono": "^4.6.10",
@@ -20,7 +21,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.10.0",
     "drizzle-kit": "^0.30.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.8"
   }
 }

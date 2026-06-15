@@ -12,7 +12,8 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "philharmonic",
   "main": "apps/worker/src/index.ts",
-  "compatibility_date": "2026-04-01",
+  // ≥ 2026-04-07 for WS close auto-reply (SPEC §10.4).
+  "compatibility_date": "2026-04-07",
   "compatibility_flags": ["nodejs_compat"],
 
   // Built SPA. `pnpm build` produces this directory.
@@ -51,9 +52,7 @@
   ],
 
   "queues": {
-    "producers": [
-      { "binding": "DISPATCH", "queue": "philharmonic-dispatch" }
-    ],
+    "producers": [{ "binding": "DISPATCH", "queue": "philharmonic-dispatch" }],
     "consumers": [
       {
         "queue": "philharmonic-dispatch",
@@ -83,13 +82,13 @@
       "binding": "RUN_TOKEN_SECRET",
       "store_id": "",
       "secret_name": "RUN_TOKEN_SECRET"
-    },
-    {
-      "binding": "INTERNAL_API_TOKEN",
-      "store_id": "",
-      "secret_name": "INTERNAL_API_TOKEN"
     }
   ],
+
+  // WORKFLOW.md text-module import (SPEC §13.4) — the canonical default
+  // template ships in containers/sandbox/WORKFLOW.md and is bundled into the
+  // Worker so new projects seed from it with no second inline copy.
+  "rules": [{ "type": "Text", "globs": ["**/*.md"] }],
 
   "observability": {
     "enabled": true,
@@ -122,17 +121,13 @@
     }
   ],
 
+  // Egress credential injection lives in the Sandbox class itself
+  // (allowedHosts + static outboundByHost, SPEC §15) — no second Worker.
   "containers": [
     {
       "class_name": "Sandbox",
       "image": "./containers/sandbox/Dockerfile",
       "instance_type": "standard-1"
-      // M7: route every container outbound HTTP through the egress proxy
-      // Worker so secrets get injected at the network edge, never in
-      // container env. Deploy that Worker first:
-      //   wrangler deploy --config apps/worker/wrangler.outbound.jsonc
-      // then uncomment:
-      // ,"global_outbound": { "service": "philharmonic-outbound" }
     }
   ],
 

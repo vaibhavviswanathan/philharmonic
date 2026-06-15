@@ -70,12 +70,8 @@
           "name": "artifacts_run_id_runs_id_fk",
           "tableFrom": "artifacts",
           "tableTo": "runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -140,10 +136,7 @@
       "indexes": {
         "events_task_created": {
           "name": "events_task_created",
-          "columns": [
-            "task_id",
-            "created_at"
-          ],
+          "columns": ["task_id", "created_at"],
           "isUnique": false
         }
       },
@@ -152,12 +145,8 @@
           "name": "events_task_id_tasks_id_fk",
           "tableFrom": "events",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -165,12 +154,8 @@
           "name": "events_run_id_runs_id_fk",
           "tableFrom": "events",
           "tableTo": "runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -251,9 +236,7 @@
       "indexes": {
         "projects_slug_unique": {
           "name": "projects_slug_unique",
-          "columns": [
-            "slug"
-          ],
+          "columns": ["slug"],
           "isUnique": true
         }
       },
@@ -340,9 +323,7 @@
       "indexes": {
         "runs_task": {
           "name": "runs_task",
-          "columns": [
-            "task_id"
-          ],
+          "columns": ["task_id"],
           "isUnique": false
         }
       },
@@ -351,12 +332,8 @@
           "name": "runs_task_id_tasks_id_fk",
           "tableFrom": "runs",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -400,9 +377,7 @@
       "indexes": {
         "task_deps_blocked_by": {
           "name": "task_deps_blocked_by",
-          "columns": [
-            "blocked_by"
-          ],
+          "columns": ["blocked_by"],
           "isUnique": false
         }
       },
@@ -411,12 +386,8 @@
           "name": "task_dependencies_task_id_tasks_id_fk",
           "tableFrom": "task_dependencies",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -424,22 +395,15 @@
           "name": "task_dependencies_blocked_by_tasks_id_fk",
           "tableFrom": "task_dependencies",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "blocked_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["blocked_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "task_dependencies_task_id_blocked_by_pk": {
-          "columns": [
-            "task_id",
-            "blocked_by"
-          ],
+          "columns": ["task_id", "blocked_by"],
           "name": "task_dependencies_task_id_blocked_by_pk"
         }
       },
@@ -533,18 +497,12 @@
       "indexes": {
         "tasks_project_status": {
           "name": "tasks_project_status",
-          "columns": [
-            "project_id",
-            "status"
-          ],
+          "columns": ["project_id", "status"],
           "isUnique": false
         },
         "tasks_project_number": {
           "name": "tasks_project_number",
-          "columns": [
-            "project_id",
-            "number"
-          ],
+          "columns": ["project_id", "number"],
           "isUnique": false
         }
       },
@@ -553,12 +511,8 @@
           "name": "tasks_project_id_projects_id_fk",
           "tableFrom": "tasks",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }

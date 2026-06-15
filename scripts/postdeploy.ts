@@ -53,11 +53,9 @@ async function applyMigrations() {
     info('Migrations land in M2 once the Drizzle schema is generated.');
     return;
   }
-  const r = spawnSync(
-    'wrangler',
-    ['d1', 'migrations', 'apply', 'philharmonic', '--remote'],
-    { stdio: 'inherit' },
-  );
+  const r = spawnSync('wrangler', ['d1', 'migrations', 'apply', 'philharmonic', '--remote'], {
+    stdio: 'inherit',
+  });
   if (r.status !== 0) {
     process.stderr.write(`\n${c.red}✗${c.reset} Migration apply failed.\n`);
     process.exit(r.status ?? 1);
@@ -89,6 +87,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stderr.write(`\n${c.red}✗${c.reset} ${err instanceof Error ? err.message : String(err)}\n`);
+  process.stderr.write(
+    `\n${c.red}✗${c.reset} ${err instanceof Error ? err.message : String(err)}\n`,
+  );
   process.exit(1);
 });

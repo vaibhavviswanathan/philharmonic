@@ -1,3 +1,21 @@
+# Continuous deploy to Cloudflare on every push to main.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   — API token with edit permissions for Workers
+#                            (incl. Containers/Workflows), D1, R2, and Queues
+#   CLOUDFLARE_ACCOUNT_ID  — your Cloudflare account ID
+#
+# Notes:
+# - `wrangler deploy` builds the sandbox container image from
+#   containers/sandbox/Dockerfile, which requires Docker. GitHub-hosted
+#   Ubuntu runners ship with Docker preinstalled, so this works out of the
+#   box; self-hosted runners need Docker available.
+# - If you installed via the Deploy-to-Cloudflare button, your fork is ALSO
+#   connected to Cloudflare Workers Builds, which deploys on every push.
+#   Running both means double deploys. Pick one: add the secrets above and
+#   disconnect Workers Builds in the Cloudflare dashboard, or keep Workers
+#   Builds and delete this workflow file.
+
 name: Deploy
 
 on:
@@ -26,6 +44,8 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Build the SPA before deploy — wrangler uploads apps/web/dist as
+      # static assets and fails if it does not exist.
       - run: pnpm build
 
       - name: Deploy Worker

@@ -28,7 +28,8 @@ export function PostDeploySetup({ hint }: { hint: string }) {
             <strong>Application URL:</strong> the hostname of this Worker
           </li>
           <li>
-            <strong>Identity providers:</strong> at least one (Google, GitHub, email OTP — your call)
+            <strong>Identity providers:</strong> at least one (Google, GitHub, email OTP — your
+            call)
           </li>
         </ul>
       </section>
@@ -36,21 +37,31 @@ export function PostDeploySetup({ hint }: { hint: string }) {
       <section>
         <h2>2. Copy the Access team domain and audience tag</h2>
         <p>
-          From <em>Settings → Custom Pages → Login URL</em> grab the team domain
-          (looks like <code>https://your-team.cloudflareaccess.com</code>). From the application's
+          From <em>Settings → Custom Pages → Login URL</em> grab the team domain (looks like{' '}
+          <code>https://your-team.cloudflareaccess.com</code>). From the application's
           <em> overview tab</em> copy the AUD tag (a long hex string).
         </p>
       </section>
 
       <section>
         <h2>3. Set the vars and re-deploy</h2>
+        <p>
+          Also set <code>API_BASE</code> to this Worker's URL (the origin in your address bar) —
+          it's how agent runs reach the task API. Without it, the agent's Tasks MCP cannot talk to
+          Philharmonic.
+        </p>
         <pre>
-{`# wrangler.jsonc → vars
+          {`# wrangler.jsonc → vars
 "ACCESS_TEAM_DOMAIN": "https://your-team.cloudflareaccess.com",
-"ACCESS_AUD": "your_application_aud_tag"
+"ACCESS_AUD": "your_application_aud_tag",
+"API_BASE": "${window.location.origin}"
 
-pnpm deploy`}
+pnpm run deploy`}
         </pre>
+        <p>
+          If you deploy via CI (GitHub Actions or Workers Builds), commit the updated{' '}
+          <code>wrangler.jsonc</code> — none of these values are secrets.
+        </p>
       </section>
 
       <section className="hint">

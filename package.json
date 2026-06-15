@@ -12,12 +12,13 @@
   "scripts": {
     "bootstrap": "tsx scripts/bootstrap.ts",
     "build": "pnpm -r build",
-    "dev": "wrangler dev",
+    "dev": "tsx scripts/dev.ts",
     "deploy": "pnpm build && wrangler deploy && tsx scripts/postdeploy.ts",
-    "migrate:local": "wrangler d1 migrations apply philharmonic --local",
+    "migrate:local": "tsx scripts/dev.ts --config-only && wrangler d1 migrations apply philharmonic --local --config wrangler.dev.jsonc",
     "migrate:remote": "wrangler d1 migrations apply philharmonic --remote",
     "seed": "tsx scripts/seed.ts",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
     "lint": "biome check .",
     "format": "biome format --write ."
   },
@@ -30,10 +31,6 @@
     "wrangler": "^4.0.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "workerd",
-      "@biomejs/biome"
-    ]
+    "onlyBuiltDependencies": ["esbuild", "workerd", "@biomejs/biome", "better-sqlite3"]
   }
 }

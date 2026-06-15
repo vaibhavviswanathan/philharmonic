@@ -1,12 +1,13 @@
 /**
  * D1 schema. See SPEC §6.1 for the canonical shape.
  *
- * `tasks.number` is per-project (PHIL-1, PHIL-2, …). Allocate it in a
+ * `tasks.number` is per-project; the human-readable identifier is
+ * `UPPER(project.slug)-number` (lib/dto.ts taskIdentifier). Allocate it in a
  * transaction when creating a task. `events.payload` is JSON; document the
  * shapes per `type` in packages/shared/src/api-types.ts.
  */
 
-import { sqliteTable, text, integer, index, primaryKey } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -24,7 +25,9 @@ export const tasks = sqliteTable(
   'tasks',
   {
     id: text('id').primaryKey(),
-    projectId: text('project_id').notNull().references(() => projects.id),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id),
     number: integer('number').notNull(),
     title: text('title').notNull(),
     description: text('description').notNull().default(''),
@@ -49,11 +52,25 @@ export const runs = sqliteTable(
   'runs',
   {
     id: text('id').primaryKey(),
-    taskId: text('task_id').notNull().references(() => tasks.id),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
     workflowInstanceId: text('workflow_instance_id'),
     sandboxId: text('sandbox_id').notNull(),
+    // `deferred` is terminal: the agent declared a dependency mid-run and the
+    // run ended early, freeing the project's concurrency slot (SPEC §6.2).
+    // No D1 migration needed — drizzle text enums carry no CHECK constraint.
     status: text('status', {
-      enum: ['queued', 'preparing', 'running', 'landing', 'succeeded', 'failed', 'cancelled'],
+      enum: [
+        'queued',
+        'preparing',
+        'running',
+        'landing',
+        'succeeded',
+        'failed',
+        'cancelled',
+        'deferred',
+      ],
     })
       .notNull()
       .default('queued'),
@@ -72,7 +89,9 @@ export const events = sqliteTable(
   'events',
   {
     id: text('id').primaryKey(),
-    taskId: text('task_id').notNull().references(() => tasks.id),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
     runId: text('run_id').references(() => runs.id),
     type: text('type', {
       enum: ['comment', 'status_change', 'agent_action', 'proof', 'system'],
@@ -98,8 +117,12 @@ export const events = sqliteTable(
 export const taskDependencies = sqliteTable(
   'task_dependencies',
   {
-    taskId: text('task_id').notNull().references(() => tasks.id),
-    blockedBy: text('blocked_by').notNull().references(() => tasks.id),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    blockedBy: text('blocked_by')
+      .notNull()
+      .references(() => tasks.id),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     createdBy: text('created_by').notNull(),
   },
@@ -111,7 +134,9 @@ export const taskDependencies = sqliteTable(
 
 export const artifacts = sqliteTable('artifacts', {
   id: text('id').primaryKey(),
-  runId: text('run_id').notNull().references(() => runs.id),
+  runId: text('run_id')
+    .notNull()
+    .references(() => runs.id),
   kind: text('kind', {
     enum: ['pr_diff', 'screenshot', 'video', 'logs', 'ci_summary', 'other'],
   }).notNull(),

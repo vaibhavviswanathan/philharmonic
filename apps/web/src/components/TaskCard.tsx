@@ -27,7 +27,11 @@ export function TaskCard({
       onDragEnd={onDragEnd}
     >
       <div className="task-id">
-        {task.status === 'blocked' ? <span className="lock" title="Blocked by another task">🔒</span> : null}
+        {task.status === 'blocked' ? (
+          <span className="lock" title="Blocked by another task">
+            🔒
+          </span>
+        ) : null}
         {task.identifier}
       </div>
       <div className="task-title">{task.title}</div>
