@@ -14,11 +14,11 @@
  * it must be re-exported from the Worker entrypoint (see src/index.ts).
  */
 
-import { Sandbox as BaseSandbox } from '@cloudflare/sandbox';
+import { Sandbox as BaseSandbox, ContainerProxy } from '@cloudflare/sandbox';
 import { readSecret } from '../lib/runtoken';
 import type { Env } from '../lib/types';
 
-export { ContainerProxy } from '@cloudflare/sandbox';
+export { ContainerProxy };
 
 /**
  * Deny-by-default allowlist. Non-HTTP(S) egress is not intercepted, so an
@@ -66,6 +66,32 @@ async function injectGitHub(req: Request, env: Env): Promise<Response> {
   return withHeader(req, 'Authorization', `Bearer ${token}`);
 }
 
+/**
+ * git-over-HTTPS on github.com authenticates with HTTP Basic (token as the
+ * password), NOT Bearer — the clone URL carries a placeholder credential
+ * (x-access-token:egress-injected) so git sends the request; we overwrite it
+ * here with the real token. The API host (api.github.com) keeps Bearer above.
+ */
+async function injectGitHubGit(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  if (url.protocol !== 'https:') return fetch(req);
+  if (hasPresignedSignature(url)) return fetch(req);
+  let token: string;
+  try {
+    token = (await readSecret(env.GITHUB_TOKEN)).trim();
+  } catch (err) {
+    console.warn('GITHUB_TOKEN unreadable in egress handler:', err);
+    return fetch(req);
+  }
+  // git-over-HTTPS Basic auth: token as the password, with the
+  // `x-access-token` username (the GitHub-Actions-standard form, accepted for
+  // classic PATs, fine-grained PATs, and App installation tokens). The clone
+  // URL carries a placeholder credential so git sends the request; we overwrite
+  // it here with the real token (§15).
+  const basic = btoa(`x-access-token:${token}`);
+  return withHeader(req, 'Authorization', `Basic ${basic}`);
+}
+
 async function injectAnthropic(req: Request, env: Env): Promise<Response> {
   // Same cleartext rule as injectGitHub — the request goes out uncredentialed.
   if (new URL(req.url).protocol !== 'https:') return fetch(req);
@@ -76,6 +102,17 @@ async function injectAnthropic(req: Request, env: Env): Promise<Response> {
 export class Sandbox extends BaseSandbox<Env> {
   /** Intercept port 443 too — GitHub/Anthropic traffic is HTTPS. The base image trusts the per-sandbox CA. */
   override interceptHttps = true;
+
+  /**
+   * Keep the container awake for the whole agent run. `runAgent` executes
+   * `claude` as a single multi-minute streaming exec (SPEC §13.3), which does
+   * NOT renew the container activity timer — so the SDK's default 10-minute
+   * `sleepAfter` fires mid-run, stops the container, and surfaces as a
+   * `WorkflowInternalError`. Set it past the 2h runAgent timeout + land
+   * retries so the container never idle-sleeps while work is in flight.
+   * The SDK parser only accepts `<int><s|m|h>` (no compound) — 150m = 2.5h.
+   */
+  override sleepAfter = '150m';
 
   constructor(ctx: ConstructorParameters<typeof BaseSandbox<Env>>[0], env: Env) {
     super(ctx, env);
@@ -95,9 +132,18 @@ export class Sandbox extends BaseSandbox<Env> {
 // Assigned after the class declaration so the inherited static SETTER runs
 // (a `static outboundByHost = …` class field would shadow the accessor with a
 // data property and never reach the SDK's per-class handler registry).
-Sandbox.outboundByHost = {
-  'github.com': injectGitHub,
-  '*.github.com': injectGitHub,
+const OUTBOUND_HANDLERS = {
+  'github.com': injectGitHubGit, // git clone/push — HTTP Basic
+  '*.github.com': injectGitHub, // api.github.com (gh CLI) — Bearer
   '*.githubusercontent.com': injectGitHub,
   'api.anthropic.com': injectAnthropic,
 };
+
+// The SDK's outbound dispatch keys the static-handler registry by the PROXY's
+// class name (props.className === "ContainerProxy"), not the Sandbox subclass —
+// so handlers registered on Sandbox alone are never found at dispatch time.
+// Register on ContainerProxy (where the lookup happens); keep Sandbox too for
+// any code path that keys by the container class.
+Sandbox.outboundByHost = OUTBOUND_HANDLERS;
+(ContainerProxy as unknown as { outboundByHost: typeof OUTBOUND_HANDLERS }).outboundByHost =
+  OUTBOUND_HANDLERS;

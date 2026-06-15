@@ -46,11 +46,6 @@ const REPO_DIR = '/workspace/repo';
 
 /** run.log frames are batched to roughly this many lines (§12.1). */
 const LOG_BATCH_LINES = 25;
-/**
- * Best-effort cadence for stashing the partial transcript to R2 mid-run, so a
- * step timeout/eviction doesn't lose everything streamed so far.
- */
-const LOG_STASH_EVERY_LINES = 250;
 
 const agentLogKey = (runId: string) => `runs/${runId}/agent-log.jsonl`;
 
@@ -152,9 +147,33 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
       // recreate the branch with -B.
       const branch = `philharmonic/${identifier.toLowerCase()}`;
       await sandbox.exec(`rm -rf ${REPO_DIR}`);
-      await sandbox.exec(
-        `git clone --depth 50 --branch ${project.defaultBranch} ${project.repoUrl} ${REPO_DIR}`,
+      // Private repos make git prompt for a username BEFORE it sends any
+      // request — so the egress handler never sees the request to inject the
+      // token into, and with no TTY git dies "could not read Username". Embed
+      // a PLACEHOLDER credential so git proceeds and sends the request; the
+      // egress handler then overwrites the Authorization header with the real
+      // token (§15) — the real secret still never enters the container.
+      // GIT_TERMINAL_PROMPT=0 makes any residual auth gap fail fast, not hang.
+      const cloneUrl = project.repoUrl.replace(
+        /^https:\/\//,
+        'https://x-access-token:egress-injected@',
       );
+      // A failed clone leaves no /workspace/repo, which the agent then can't cd
+      // into — surface git's own error instead of failing opaquely downstream.
+      const clone = await sandbox.exec(
+        `git clone --depth 50 --branch ${project.defaultBranch} ${cloneUrl} ${REPO_DIR}`,
+        { env: { GIT_TERMINAL_PROMPT: '0' } },
+      );
+      if (clone.exitCode !== 0) {
+        throw new Error(
+          `git clone failed (${clone.exitCode}): ${(clone.stderr ?? '').split('\n').slice(-10).join('\n')}`,
+        );
+      }
+      // Verify the working tree actually exists before handing off.
+      const check = await sandbox.exec(`test -d ${REPO_DIR}/.git && echo ok`);
+      if (!(check.stdout ?? '').includes('ok')) {
+        throw new Error(`clone reported success but ${REPO_DIR}/.git is missing`);
+      }
       await sandbox.exec(`git -C ${REPO_DIR} config user.email "agent@philharmonic.local"`);
       await sandbox.exec(`git -C ${REPO_DIR} config user.name "Philharmonic Agent"`);
       await sandbox.exec(`git -C ${REPO_DIR} checkout -B ${branch}`);
@@ -200,79 +219,126 @@ export class ImplementationRun extends WorkflowEntrypoint<Env, ImplementationRun
             `--mcp-config ${WORKDIR_META}/mcp.json`,
             '--permission-mode=acceptEdits',
             '--max-turns 100',
+            // Close stdin: a detached process with an open stdin pipe can make
+            // claude block in interactive mode and produce nothing (TL.5).
+            '< /dev/null',
           ].join(' ');
 
-          // Reset on retry — a second attempt in the same isolate must not
-          // append onto the first attempt's transcript.
+          // Run the agent as a BACKGROUND process and poll its logs in short
+          // requests, rather than one long streaming exec. A single streaming
+          // exec held one connection open for the whole run and hit a ~30-min
+          // platform wall (TL.4); it also discarded stderr, so claude's
+          // startup/auth failures were invisible (TL.5). startProcess +
+          // getProcessLogs keeps every request short and captures stderr too.
           agentLog.text = '';
-          let lineBuffer = '';
-          let pendingLines: string[] = [];
-          let linesSinceStash = 0;
-          // Broadcasts/stashes are chained so frames stay ordered without
-          // blocking the synchronous onOutput callback.
-          let pump: Promise<unknown> = Promise.resolve();
+          const PID = `agent-${runId}`;
 
-          const flushLogBatch = () => {
-            if (pendingLines.length === 0) return;
-            const lines = pendingLines;
-            pendingLines = [];
-            linesSinceStash += lines.length;
-            const stash = linesSinceStash >= LOG_STASH_EVERY_LINES;
-            if (stash) linesSinceStash = 0;
-            pump = pump
-              .then(() => safeBroadcast(this.env, projectId, { type: 'run.log', runId, lines }))
-              .then(() =>
-                stash
-                  ? this.env.ARTIFACTS.put(agentLogKey(runId), agentLog.text).catch((err) => {
-                      console.warn('partial transcript stash failed:', err);
-                    })
-                  : undefined,
-              );
-          };
+          // Clean up any process a prior attempt left running before relaunch
+          // (retries replay this body in a fresh isolate).
+          await sandbox.killAllProcesses().catch(() => {});
+          await sandbox.startProcess(`bash -c '${cmd.replace(/'/g, "'\\''")}'`, {
+            processId: PID,
+            cwd: REPO_DIR,
+            // Keep the record after exit so we can read the exit code.
+            autoCleanup: false,
+            // Placeholder credentials: gh/claude refuse to start with no local
+            // token; the outbound handler overwrites the auth headers at the
+            // edge (§13.3/§15), so real secrets never enter the container.
+            env: { GH_TOKEN: 'egress-injected', ANTHROPIC_API_KEY: 'egress-injected' },
+          });
+
+          const POLL_MS = 8_000;
+          const MAX_MS = 2 * 60 * 60 * 1000; // hard cap, matches the step timeout
+          const QUIET_MS = 2 * 60 * 1000; // no output for 2m + still running ⇒ stuck
+          const startedAt = Date.now();
+          let lastOutputAt = Date.now();
+          let emittedLines = 0; // stdout lines already broadcast
+
+          const persist = () =>
+            this.env.ARTIFACTS.put(agentLogKey(runId), agentLog.text).catch((err) => {
+              console.warn('transcript stash failed:', err);
+            });
 
           try {
-            const result = await sandbox.exec(`bash -c '${cmd.replace(/'/g, "'\\''")}'`, {
-              cwd: REPO_DIR,
-              stream: true,
-              // Placeholder credentials: gh/claude refuse to start with no
-              // local token; the outbound handler overwrites the auth headers
-              // at the edge (§13.3/§15), so real secrets never enter the
-              // container.
-              env: {
-                GH_TOKEN: 'egress-injected',
-                ANTHROPIC_API_KEY: 'egress-injected',
-              },
-              onOutput: (stream, data) => {
-                if (stream !== 'stdout') return;
-                agentLog.text += data;
-                lineBuffer += data;
-                const segments = lineBuffer.split('\n');
-                lineBuffer = segments.pop() ?? '';
-                for (const line of segments) {
-                  if (line.trim().length > 0) pendingLines.push(line);
+            while (true) {
+              await new Promise((r) => setTimeout(r, POLL_MS));
+
+              let stderr = '';
+              try {
+                const logs = await sandbox.getProcessLogs(PID);
+                const stdout = logs.stdout ?? '';
+                stderr = logs.stderr ?? '';
+                agentLog.text = stderr ? `${stdout}\n--- stderr ---\n${stderr}` : stdout;
+                const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
+                if (lines.length > emittedLines) {
+                  const fresh = lines.slice(emittedLines);
+                  emittedLines = lines.length;
+                  lastOutputAt = Date.now();
+                  for (let i = 0; i < fresh.length; i += LOG_BATCH_LINES) {
+                    await safeBroadcast(this.env, projectId, {
+                      type: 'run.log',
+                      runId,
+                      lines: fresh.slice(i, i + LOG_BATCH_LINES),
+                    });
+                  }
                 }
-                if (pendingLines.length >= LOG_BATCH_LINES) flushLogBatch();
-              },
-            });
-            if (result.exitCode !== 0) {
-              const tail = (result.stderr ?? '').split('\n').slice(-20).join('\n');
-              throw new Error(`claude exited ${result.exitCode}: ${tail}`);
+                // Persist every poll so any output (incl. a short stderr error
+                // or a pure hang's emptiness) is visible within one poll.
+                if (agentLog.text.length > 0) await persist();
+              } catch {
+                // logs momentarily unavailable — fall through to the status check
+              }
+
+              let status = 'running';
+              let exitCode: number | null = null;
+              try {
+                const proc = await sandbox.getProcess(PID);
+                if (proc) {
+                  status = await proc.getStatus();
+                  exitCode = proc.exitCode ?? null;
+                } else {
+                  status = 'gone';
+                }
+              } catch {
+                status = 'gone';
+              }
+
+              if (status === 'completed') {
+                await persist();
+                if (exitCode != null && exitCode !== 0) {
+                  throw new Error(
+                    `claude exited ${exitCode}: ${stderr.split('\n').slice(-25).join('\n')}`,
+                  );
+                }
+                break;
+              }
+              if (
+                status === 'failed' ||
+                status === 'killed' ||
+                status === 'error' ||
+                status === 'gone'
+              ) {
+                await persist();
+                throw new Error(`claude ${status}: ${stderr.split('\n').slice(-25).join('\n')}`);
+              }
+
+              const now = Date.now();
+              if (now - startedAt > MAX_MS) {
+                await sandbox.killProcess(PID).catch(() => {});
+                await persist();
+                throw new Error('agent run exceeded the 2h cap');
+              }
+              if (now - lastOutputAt > QUIET_MS) {
+                await sandbox.killProcess(PID).catch(() => {});
+                await persist();
+                throw new Error(
+                  `agent produced no output for ${Math.round(QUIET_MS / 60000)}m — treating as stuck. stderr tail: ${stderr.split('\n').slice(-25).join('\n')}`,
+                );
+              }
             }
           } finally {
-            if (lineBuffer.trim().length > 0) {
-              pendingLines.push(lineBuffer);
-              lineBuffer = '';
-            }
-            flushLogBatch();
-            await pump;
-            // Stash the full transcript inside the step that produced it —
-            // finish/mark-failed run as separate steps and may replay in a
-            // fresh isolate where agentLog is empty.
-            if (agentLog.text.length > 0) {
-              await this.env.ARTIFACTS.put(agentLogKey(runId), agentLog.text).catch((err) => {
-                console.warn('transcript stash failed:', err);
-              });
-            }
+            await sandbox.killProcess(PID).catch(() => {});
+            if (agentLog.text.length > 0) await persist();
           }
         },
       );
