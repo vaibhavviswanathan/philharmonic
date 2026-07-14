@@ -43,6 +43,8 @@ Priority: `{{ task.priority }}` · Filed by: {{ task.createdBy }}
 
 2. **Make a plan and share it.** Use `philharmonic.post_comment` to post your plan as a comment on the task. The team reads these. Aim for 4–8 bullet points: what you'll change, which files, which tests, what could go wrong.
 
+   **If your plan reveals that this task depends on incomplete work** (another open task you can identify, an unmerged PR, a feature that hasn't shipped yet), call `philharmonic.declare_dependency({ blockedBy: 'PHIL-N', reason: '...' })` *before writing code*, post a one-paragraph explanation via `philharmonic.post_comment`, and exit. The platform will re-queue this task automatically once the blocker is done. Don't ship a PR you know will break.
+
 3. **Implement the change.** Match the existing code style — formatting, naming, patterns. If the project uses TypeScript with strict mode, your code is TypeScript with strict mode. If it uses Python with type hints, your code has type hints. **Read three nearby files before writing one.**
 
 4. **Run the tests.** Whatever the project's test command is (`npm test`, `pytest`, `cargo test`, `go test ./...`) — run it. If there are no tests for what you changed, add at least one.

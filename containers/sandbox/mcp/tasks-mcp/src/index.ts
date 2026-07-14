@@ -138,6 +138,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: 'Return the project WORKFLOW.md template.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
+    {
+      name: 'declare_dependency',
+      description:
+        'Mark this task as blocked by another task. Use when you discover the work cannot be completed until another task ships. After calling this, post a brief explanatory comment and exit — the run will be re-queued automatically once the blocker resolves.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          blockedBy: {
+            type: 'string',
+            description: "Task identifier (e.g. 'PHIL-7') or task UUID, in this project.",
+          },
+          reason: {
+            type: 'string',
+            description: 'Short explanation of why this work depends on that task.',
+          },
+        },
+        required: ['blockedBy'],
+        additionalProperties: false,
+      },
+    },
   ],
 }));
 
@@ -177,6 +197,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'read_workflow_md': {
         const r = await api('/api/internal/workflow-md');
         if (r.status >= 400) return asError(`read_workflow_md failed (${r.status})`);
+        return asTextResult(r.body);
+      }
+      case 'declare_dependency': {
+        const r = await api('/api/internal/dependencies', {
+          method: 'POST',
+          body: JSON.stringify(args),
+        });
+        if (r.status >= 400) return asError(`declare_dependency failed (${r.status})`);
         return asTextResult(r.body);
       }
       default:
